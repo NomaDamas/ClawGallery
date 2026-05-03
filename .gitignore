@@ -1,0 +1,10 @@
+/target/
+**/*.rs.bk
+.DS_Store
+.env
+.env.*
+!.env.example
+.omx/state/
+.omx/logs/
+.omx/context/
+.omx/plans/
