@@ -1,0 +1,24 @@
+[package]
+name = "clawgallery"
+version = "0.1.0"
+authors = ["Jeffrey (Dongkyu) Kim <vkehfdl1@gmail.com>"]
+edition = "2024"
+description = "Agent-native screenshot gallery CLI with JSONL metadata, visual captions, and safe rename workflows."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+anyhow = "1.0"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive"] }
+dirs = "6.0"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+thiserror = "2.0"
+uuid = { version = "1.18", features = ["v4", "serde"] }
+walkdir = "2.5"
+
+[dev-dependencies]
+tempfile = "3.23"
