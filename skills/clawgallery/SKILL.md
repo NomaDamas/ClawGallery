@@ -55,6 +55,26 @@ Poll once for newly added images:
 clawgallery poll --once
 ```
 
+Re-sync after files were deleted or moved outside ClawGallery:
+
+```bash
+clawgallery bootstrap --prune
+```
+
+`--prune` appends `active=false` records to `images.jsonl` for any tracked path that is no longer on disk. The history is preserved (JSONL is append-only); downstream commands (`search`, `status`, `caption`, `rename`) automatically ignore inactive records.
+
+## State model
+
+ClawGallery state is split into three append-only JSONL event logs that join via `image_id`:
+
+| File | Owner command | Records |
+|------|---------------|---------|
+| `images.jsonl` | `bootstrap`, `bootstrap --prune`, `rename --apply` | `ImageRecord` per discovery, prune, or rename |
+| `captions.jsonl` | `caption` | `CaptionRecord` per successful model call |
+| `renames.jsonl` | `rename` | `RenameRecord` per dry-run or apply attempt |
+
+The three steps are deliberately separated so cheap, free, idempotent indexing (`bootstrap`) is decoupled from paid network calls (`caption`) and from irreversible filesystem mutations (`rename --apply`).
+
 ## Agent guidance
 
 1. Prefer `search` before asking the user to locate screenshots manually.

@@ -39,6 +39,14 @@ By default state is stored under `~/.config/clawgallery`:
 
 Set `CLAWGALLERY_CONFIG_DIR=/path/to/state` to override this location.
 
+State is split across three append-only JSONL event logs joined by `image_id`:
+
+- `bootstrap` writes new `ImageRecord`s to `images.jsonl`. Pass `--prune` to also append `active=false` records for files that have disappeared from disk.
+- `caption` writes one `CaptionRecord` per successful run to `captions.jsonl`.
+- `rename --apply` writes a `RenameRecord` to `renames.jsonl` and appends a fresh `ImageRecord` with the new `path` (preserving the original `id` and `sha256`).
+
+Each downstream command (`search`, `status`, `caption`, `rename`) treats the latest record per path as authoritative and ignores `active=false` (pruned) entries.
+
 ## Visual model auth
 
 ClawGallery supports multiple vision providers via a unified abstraction.
@@ -76,8 +84,8 @@ clawgallery init
 clawgallery folder add <path> [--recursive]
 clawgallery folder remove <id-or-path>
 clawgallery folder list
-clawgallery bootstrap [--folder <id>] [--path <path>]
-clawgallery poll [--once] [--interval <seconds>]
+clawgallery bootstrap [--folder <id>] [--path <path>] [--prune]
+clawgallery poll [--once] [--interval <seconds>] [--prune]
 clawgallery caption [--missing] [--file <path>] [--dry-run] [--model <model>] [--provider <provider>]
 clawgallery rename [--apply] [--file <path>] [--style title|caption|date-title]
 clawgallery search <keywords...> [--limit <n>]

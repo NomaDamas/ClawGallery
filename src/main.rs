@@ -92,6 +92,9 @@ struct IngestArgs {
     /// Bootstrap a one-off path without registering it first.
     #[arg(long)]
     path: Option<PathBuf>,
+    /// Mark previously ingested images that are no longer on disk as inactive.
+    #[arg(long)]
+    prune: bool,
 }
 
 #[derive(Debug, Args)]
@@ -252,6 +255,14 @@ struct ImageRecord {
     modified_at: Option<DateTime<Utc>>,
     discovered_at: DateTime<Utc>,
     extension: String,
+    #[serde(default = "default_active")]
+    active: bool,
+    #[serde(default)]
+    removed_at: Option<DateTime<Utc>>,
+}
+
+fn default_active() -> bool {
+    true
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -336,8 +347,11 @@ fn main() -> Result<()> {
             FolderCommand::Remove(args) => cmd_folder_remove(&paths, args),
             FolderCommand::List => cmd_folder_list(&paths),
         },
-        Command::Bootstrap(args) => cmd_bootstrap(&paths, &args).map(|count| {
-            println!("ingested {count} new image(s)");
+        Command::Bootstrap(args) => cmd_bootstrap(&paths, &args).map(|stats| {
+            println!("ingested {} new image(s)", stats.ingested);
+            if args.prune {
+                println!("pruned {} missing image(s)", stats.pruned);
+            }
         }),
         Command::Poll(args) => cmd_poll(&paths, args),
         Command::Caption(args) => cmd_caption(&paths, args),
@@ -428,14 +442,19 @@ fn cmd_folder_list(paths: &AppPaths) -> Result<()> {
     Ok(())
 }
 
-fn cmd_bootstrap(paths: &AppPaths, args: &IngestArgs) -> Result<usize> {
+struct BootstrapStats {
+    ingested: usize,
+    pruned: usize,
+}
+
+fn cmd_bootstrap(paths: &AppPaths, args: &IngestArgs) -> Result<BootstrapStats> {
     paths.ensure()?;
     if !paths.config.exists() {
         write_json_pretty(&paths.config, &AppConfig::default())?;
     }
     let existing = latest_images_by_path(paths)?;
     let mut seen_paths: HashSet<PathBuf> = existing.keys().cloned().collect();
-    let mut new_count = 0;
+    let mut ingested = 0;
     for image_path in candidate_image_paths(paths, args)? {
         let canonical = fs::canonicalize(&image_path).unwrap_or(image_path.clone());
         if seen_paths.contains(&canonical) {
@@ -445,18 +464,46 @@ fn cmd_bootstrap(paths: &AppPaths, args: &IngestArgs) -> Result<usize> {
             Ok(record) => {
                 append_jsonl(&paths.images, &record)?;
                 seen_paths.insert(record.path.clone());
-                new_count += 1;
+                ingested += 1;
             }
             Err(err) => log_error(paths, "ingest", err),
         }
     }
-    Ok(new_count)
+    let pruned = if args.prune {
+        prune_missing(paths, &existing)?
+    } else {
+        0
+    };
+    Ok(BootstrapStats { ingested, pruned })
+}
+
+fn prune_missing(paths: &AppPaths, active_images: &HashMap<PathBuf, ImageRecord>) -> Result<usize> {
+    let mut pruned = 0;
+    let now = Utc::now();
+    for image in active_images.values() {
+        if image.path.exists() {
+            continue;
+        }
+        let mut deactivated = image.clone();
+        deactivated.active = false;
+        deactivated.removed_at = Some(now);
+        append_jsonl(&paths.images, &deactivated)?;
+        pruned += 1;
+    }
+    Ok(pruned)
 }
 
 fn cmd_poll(paths: &AppPaths, args: PollArgs) -> Result<()> {
     loop {
-        let count = cmd_bootstrap(paths, &args.ingest)?;
-        println!("{}: ingested {count} new image(s)", Utc::now().to_rfc3339());
+        let stats = cmd_bootstrap(paths, &args.ingest)?;
+        println!(
+            "{}: ingested {} new image(s)",
+            Utc::now().to_rfc3339(),
+            stats.ingested
+        );
+        if args.ingest.prune {
+            println!("pruned {} missing image(s)", stats.pruned);
+        }
         if args.once {
             break;
         }
@@ -709,6 +756,13 @@ fn latest_images(paths: &AppPaths) -> Result<Vec<ImageRecord>> {
 }
 
 fn latest_images_by_path(paths: &AppPaths) -> Result<HashMap<PathBuf, ImageRecord>> {
+    Ok(all_latest_images_by_path(paths)?
+        .into_iter()
+        .filter(|(_, image)| image.active)
+        .collect())
+}
+
+fn all_latest_images_by_path(paths: &AppPaths) -> Result<HashMap<PathBuf, ImageRecord>> {
     let mut images = HashMap::new();
     for image in read_jsonl::<ImageRecord>(&paths.images)? {
         images.insert(image.path.clone(), image);
@@ -785,6 +839,8 @@ fn build_image_record(path: &Path) -> Result<ImageRecord> {
         modified_at,
         discovered_at: Utc::now(),
         extension,
+        active: true,
+        removed_at: None,
     })
 }
 
