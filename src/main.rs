@@ -120,6 +120,9 @@ struct CaptionArgs {
     /// Override model for this run.
     #[arg(long)]
     model: Option<String>,
+    /// Override provider for this run (openai-compatible or gemini).
+    #[arg(long)]
+    provider: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -199,17 +202,32 @@ impl AppPaths {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct AppConfig {
+    #[serde(default = "default_model")]
     model: String,
+    #[serde(default = "default_provider_str")]
     provider: String,
+    #[serde(default = "default_filename_limit")]
     filename_limit_bytes: usize,
+}
+
+fn default_model() -> String {
+    env::var("CLAWGALLERY_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string())
+}
+
+fn default_provider_str() -> String {
+    "openai-compatible".to_string()
+}
+
+fn default_filename_limit() -> usize {
+    DEFAULT_FILENAME_LIMIT_BYTES
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            model: env::var("CLAWGALLERY_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string()),
-            provider: "openai-compatible".to_string(),
-            filename_limit_bytes: DEFAULT_FILENAME_LIMIT_BYTES,
+            model: default_model(),
+            provider: default_provider_str(),
+            filename_limit_bytes: default_filename_limit(),
         }
     }
 }
@@ -268,6 +286,44 @@ struct ErrorRecord {
 struct CaptionOutput {
     title: String,
     description: String,
+}
+
+enum Provider {
+    OpenAiCompat(OpenAiCompatProvider),
+    Gemini(GeminiProvider),
+}
+
+impl Provider {
+    fn caption_image(&self, path: &Path) -> Result<CaptionOutput> {
+        match self {
+            Provider::OpenAiCompat(p) => p.caption_image(path),
+            Provider::Gemini(p) => p.caption_image(path),
+        }
+    }
+}
+
+fn build_provider(
+    config: &AppConfig,
+    cli_provider: Option<String>,
+    cli_model: Option<String>,
+) -> Result<Provider> {
+    let provider_name = cli_provider.unwrap_or_else(|| config.provider.clone());
+    let model = cli_model.unwrap_or_else(|| config.model.clone());
+    match provider_name.as_str() {
+        "gemini" => {
+            let api_key = env::var("GEMINI_API_KEY")
+                .with_context(|| "missing GEMINI_API_KEY environment variable")?;
+            Ok(Provider::Gemini(GeminiProvider::new(api_key, model)))
+        }
+        _ => {
+            let auth = Auth::discover()?;
+            let base_url = env::var("OPENAI_BASE_URL")
+                .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+            Ok(Provider::OpenAiCompat(OpenAiCompatProvider::new(
+                auth, model, base_url,
+            )))
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -412,7 +468,7 @@ fn cmd_poll(paths: &AppPaths, args: PollArgs) -> Result<()> {
 fn cmd_caption(paths: &AppPaths, args: CaptionArgs) -> Result<()> {
     paths.ensure()?;
     let config = read_config(paths)?;
-    let model = args.model.unwrap_or(config.model);
+    let provider = build_provider(&config, args.provider, args.model.clone())?;
     let mut images = latest_images(paths)?;
     if let Some(file) = args.file {
         let canonical = fs::canonicalize(&file).unwrap_or(file);
@@ -438,18 +494,16 @@ fn cmd_caption(paths: &AppPaths, args: CaptionArgs) -> Result<()> {
         }
         return Ok(());
     }
-    let auth = Auth::discover()?;
-    let client = OpenAiCompatClient::new(auth, model.clone());
     for image in images {
-        match client.caption_image(&image.path) {
+        match provider.caption_image(&image.path) {
             Ok(output) => {
                 let record = CaptionRecord {
                     image_id: image.id.clone(),
                     path: image.path.clone(),
                     title: output.title,
                     description: output.description,
-                    model: model.clone(),
-                    provider: "openai-compatible".to_string(),
+                    model: args.model.clone().unwrap_or_else(|| config.model.clone()),
+                    provider: config.provider.clone(),
                     created_at: Utc::now(),
                 };
                 append_jsonl(&paths.captions, &record)?;
@@ -574,6 +628,7 @@ fn cmd_skill_path(paths: &AppPaths) -> Result<()> {
 fn cmd_status(paths: &AppPaths) -> Result<()> {
     let config = read_config(paths).unwrap_or_default();
     println!("config_dir: {}", paths.root.display());
+    println!("provider: {}", config.provider);
     println!("model: {}", config.model);
     println!("folders: {}", active_folders(paths)?.len());
     println!("images: {}", latest_images(paths)?.len());
@@ -744,20 +799,14 @@ fn is_image_path(path: &Path) -> bool {
 #[derive(Debug)]
 struct Auth {
     bearer: String,
-    base_url: String,
 }
 
 impl Auth {
     fn discover() -> Result<Self> {
-        let base_url =
-            env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
         if let Ok(key) = env::var("OPENAI_API_KEY")
             && !key.trim().is_empty()
         {
-            return Ok(Self {
-                bearer: key,
-                base_url,
-            });
+            return Ok(Self { bearer: key });
         }
         let auth_path = codex_home().join("auth.json");
         if auth_path.exists() {
@@ -771,7 +820,6 @@ impl Auth {
             {
                 return Ok(Self {
                     bearer: key.to_string(),
-                    base_url,
                 });
             }
             if let Some(token) = value
@@ -782,7 +830,6 @@ impl Auth {
             {
                 return Ok(Self {
                     bearer: token.to_string(),
-                    base_url,
                 });
             }
         }
@@ -802,14 +849,19 @@ fn codex_home() -> PathBuf {
         })
 }
 
-struct OpenAiCompatClient {
+struct OpenAiCompatProvider {
     auth: Auth,
     model: String,
+    base_url: String,
 }
 
-impl OpenAiCompatClient {
-    fn new(auth: Auth, model: String) -> Self {
-        Self { auth, model }
+impl OpenAiCompatProvider {
+    fn new(auth: Auth, model: String, base_url: String) -> Self {
+        Self {
+            auth,
+            model,
+            base_url,
+        }
     }
 
     fn caption_image(&self, path: &Path) -> Result<CaptionOutput> {
@@ -831,7 +883,7 @@ impl OpenAiCompatClient {
             }],
             "max_output_tokens": 500
         });
-        let url = format!("{}/responses", self.auth.base_url.trim_end_matches('/'));
+        let url = format!("{}/responses", self.base_url.trim_end_matches('/'));
         let response: Value = reqwest::blocking::Client::new()
             .post(url)
             .bearer_auth(&self.auth.bearer)
@@ -843,6 +895,57 @@ impl OpenAiCompatClient {
     }
 }
 
+struct GeminiProvider {
+    api_key: String,
+    model: String,
+    base_url: String,
+}
+
+impl GeminiProvider {
+    fn new(api_key: String, model: String) -> Self {
+        Self {
+            api_key,
+            model,
+            base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
+        }
+    }
+
+    fn caption_image(&self, path: &Path) -> Result<CaptionOutput> {
+        let image_data =
+            fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(image_data);
+        let request = json!({
+            "contents": [{
+                "parts": [
+                    {"text": "You are ClawGallery. Analyze this screenshot/image and return compact JSON only: {\"title\":\"kebab or spaced concise filename title under 80 chars\",\"description\":\"detailed searchable caption with visible text, app/site, UI state, entities, and likely context\"}."},
+                    {"inline_data": {"mime_type": mime_for_path(path), "data": b64}}
+                ]
+            }]
+        });
+        let url = format!(
+            "{}/models/{}:generateContent?key={}",
+            self.base_url, self.model, self.api_key
+        );
+        let response: Value = reqwest::blocking::Client::new()
+            .post(&url)
+            .json(&request)
+            .send()?
+            .error_for_status()?
+            .json()?;
+        let text = response
+            .get("candidates")
+            .and_then(|c| c.as_array()?.first())
+            .and_then(|c| c.get("content"))
+            .and_then(|c| c.get("parts"))
+            .and_then(|p| p.as_array()?.first())
+            .and_then(|p| p.get("text"))
+            .and_then(|t| t.as_str())
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| anyhow!("Gemini response did not include text"))?;
+        parse_caption_text(&text)
+    }
+}
+
 fn parse_caption_response(response: &Value) -> Result<CaptionOutput> {
     let text = response
         .get("output_text")
@@ -850,6 +953,10 @@ fn parse_caption_response(response: &Value) -> Result<CaptionOutput> {
         .map(ToOwned::to_owned)
         .or_else(|| collect_response_text(response));
     let text = text.ok_or_else(|| anyhow!("model response did not include output_text"))?;
+    parse_caption_text(&text)
+}
+
+fn parse_caption_text(text: &str) -> Result<CaptionOutput> {
     let value: Value = serde_json::from_str(text.trim()).or_else(|_| {
         let start = text
             .find('{')
@@ -1047,6 +1154,37 @@ mod tests {
         let parsed = parse_caption_response(&response).unwrap();
         assert_eq!(parsed.title, "Settings screen");
         assert!(parsed.description.contains("macOS"));
+    }
+
+    #[test]
+    fn parses_caption_text_directly() {
+        let text = r#"{"title":"Gemini result","description":"A Gemini-generated description"}"#;
+        let parsed = parse_caption_text(text).unwrap();
+        assert_eq!(parsed.title, "Gemini result");
+        assert!(parsed.description.contains("Gemini"));
+    }
+
+    #[test]
+    fn parses_gemini_response_text() {
+        let response = json!({
+            "candidates": [{
+                "content": {
+                    "parts": [{"text": "{\"title\":\"Gemini screen\",\"description\":\"A Gemini vision result\"}"}]
+                }
+            }]
+        });
+        let text = response
+            .get("candidates")
+            .and_then(|c| c.as_array()?.first())
+            .and_then(|c| c.get("content"))
+            .and_then(|c| c.get("parts"))
+            .and_then(|p| p.as_array()?.first())
+            .and_then(|p| p.get("text"))
+            .and_then(|t| t.as_str())
+            .unwrap();
+        let parsed = parse_caption_text(text).unwrap();
+        assert_eq!(parsed.title, "Gemini screen");
+        assert!(parsed.description.contains("vision"));
     }
 
     #[test]

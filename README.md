@@ -41,15 +41,33 @@ Set `CLAWGALLERY_CONFIG_DIR=/path/to/state` to override this location.
 
 ## Visual model auth
 
-ClawGallery uses OpenAI-compatible `/v1/responses` requests for image understanding.
+ClawGallery supports multiple vision providers via a unified abstraction.
 
-Supported environment variables:
+### OpenAI-compatible (default)
+
+Uses OpenAI-compatible `/v1/responses` requests for image understanding.
 
 - `OPENAI_API_KEY`
 - `OPENAI_BASE_URL` (defaults to `https://api.openai.com/v1`)
 - `CLAWGALLERY_MODEL` (defaults to `gpt-4.1-mini`)
 
-Best-effort Codex auth reuse is supported by reading `$CODEX_HOME/auth.json` or `~/.codex/auth.json` for `OPENAI_API_KEY` or `tokens.access_token`, matching the current Codex auth-file shape observed from the OpenAI Codex Rust codebase. This is intentionally opportunistic so ClawGallery does not depend on a private/stable Codex API.
+Best-effort Codex auth reuse is supported by reading `$CODEX_HOME/auth.json` or `~/.codex/auth.json` for `OPENAI_API_KEY` or `tokens.access_token`.
+
+### Google Gemini
+
+Uses the Gemini Generative Language API.
+
+- `GEMINI_API_KEY`
+- Default model: `gemini-2.5-flash` (set via `--model` or config)
+
+### Switching providers
+
+Set the provider in config or override per-run:
+
+```bash
+clawgallery caption --provider gemini --model gemini-2.5-flash
+clawgallery caption --provider openai-compatible --model gpt-4.1-mini
+```
 
 ## Commands
 
@@ -60,7 +78,7 @@ clawgallery folder remove <id-or-path>
 clawgallery folder list
 clawgallery bootstrap [--folder <id>] [--path <path>]
 clawgallery poll [--once] [--interval <seconds>]
-clawgallery caption [--missing] [--file <path>] [--dry-run] [--model <model>]
+clawgallery caption [--missing] [--file <path>] [--dry-run] [--model <model>] [--provider <provider>]
 clawgallery rename [--apply] [--file <path>] [--style title|caption|date-title]
 clawgallery search <keywords...> [--limit <n>]
 clawgallery status
