@@ -119,3 +119,61 @@ fn skill_path_materializes_embedded_skill() {
     let skill = fs::read_to_string(path).unwrap();
     assert!(skill.contains("name: clawgallery"));
 }
+
+#[test]
+fn caption_dry_run_does_not_require_credentials() {
+    // Regression: dry-run never calls the network and must never require auth.
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).unwrap();
+    let image = images.join("screen.png");
+    fs::write(&image, b"not really png").unwrap();
+
+    assert_success(run(&config, &["init"]));
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", images.to_str().unwrap()],
+    ));
+
+    let output = run(&config, &["caption", "--dry-run"]);
+    if !output.status.success() {
+        panic!(
+            "caption --dry-run should succeed without credentials\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("would caption"),
+        "dry-run output should list planned targets, got: {stdout}"
+    );
+    let captions = config.join("captions.jsonl");
+    assert_eq!(
+        fs::read_to_string(captions).unwrap(),
+        "",
+        "dry-run must not write captions.jsonl"
+    );
+}
+
+#[test]
+fn caption_dry_run_with_explicit_file_does_not_require_credentials() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    let image = temp.path().join("screen.png");
+    fs::write(&image, b"not really png").unwrap();
+    assert_success(run(&config, &["init"]));
+
+    let output = run(
+        &config,
+        &["caption", "--file", image.to_str().unwrap(), "--dry-run"],
+    );
+    if !output.status.success() {
+        panic!(
+            "caption --file --dry-run should succeed without credentials\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}

@@ -465,10 +465,23 @@ fn cmd_poll(paths: &AppPaths, args: PollArgs) -> Result<()> {
     Ok(())
 }
 
+fn resolve_provider(cli_provider: Option<&str>, config_provider: &str) -> String {
+    cli_provider
+        .map(str::to_string)
+        .unwrap_or_else(|| config_provider.to_string())
+}
+
+fn resolve_model(cli_model: Option<&str>, config_model: &str) -> String {
+    cli_model
+        .map(str::to_string)
+        .unwrap_or_else(|| config_model.to_string())
+}
+
 fn cmd_caption(paths: &AppPaths, args: CaptionArgs) -> Result<()> {
     paths.ensure()?;
     let config = read_config(paths)?;
-    let provider = build_provider(&config, args.provider, args.model.clone())?;
+    let effective_provider = resolve_provider(args.provider.as_deref(), &config.provider);
+    let effective_model = resolve_model(args.model.as_deref(), &config.model);
     let mut images = latest_images(paths)?;
     if let Some(file) = args.file {
         let canonical = fs::canonicalize(&file).unwrap_or(file);
@@ -494,6 +507,7 @@ fn cmd_caption(paths: &AppPaths, args: CaptionArgs) -> Result<()> {
         }
         return Ok(());
     }
+    let provider = build_provider(&config, args.provider, args.model.clone())?;
     for image in images {
         match provider.caption_image(&image.path) {
             Ok(output) => {
@@ -502,8 +516,8 @@ fn cmd_caption(paths: &AppPaths, args: CaptionArgs) -> Result<()> {
                     path: image.path.clone(),
                     title: output.title,
                     description: output.description,
-                    model: args.model.clone().unwrap_or_else(|| config.model.clone()),
-                    provider: config.provider.clone(),
+                    model: effective_model.clone(),
+                    provider: effective_provider.clone(),
                     created_at: Utc::now(),
                 };
                 append_jsonl(&paths.captions, &record)?;
@@ -1185,6 +1199,35 @@ mod tests {
         let parsed = parse_caption_text(text).unwrap();
         assert_eq!(parsed.title, "Gemini screen");
         assert!(parsed.description.contains("vision"));
+    }
+
+    #[test]
+    fn cli_provider_overrides_config_provider() {
+        assert_eq!(
+            resolve_provider(Some("gemini"), "openai-compatible"),
+            "gemini"
+        );
+    }
+
+    #[test]
+    fn config_provider_used_when_cli_absent() {
+        assert_eq!(
+            resolve_provider(None, "openai-compatible"),
+            "openai-compatible"
+        );
+    }
+
+    #[test]
+    fn cli_model_overrides_config_model() {
+        assert_eq!(
+            resolve_model(Some("gemini-2.5-flash"), "gpt-4.1-mini"),
+            "gemini-2.5-flash"
+        );
+    }
+
+    #[test]
+    fn config_model_used_when_cli_absent() {
+        assert_eq!(resolve_model(None, "gpt-4.1-mini"), "gpt-4.1-mini");
     }
 
     #[test]
