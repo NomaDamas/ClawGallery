@@ -122,6 +122,40 @@ fn skill_path_materializes_embedded_skill() {
 }
 
 #[test]
+fn caption_dry_run_predicts_filename_meaningful_from_regex() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).unwrap();
+    fs::write(images.join("IMG_0034.png"), b"x").unwrap();
+    fs::write(images.join("Eva-William.png"), b"y").unwrap();
+
+    assert_success(run(&config, &["init"]));
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", images.to_str().unwrap()],
+    ));
+    let stdout = assert_success(run(&config, &["caption", "--dry-run"]));
+
+    assert!(
+        stdout.contains("would caption "),
+        "dry-run still announces planned captions, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("filename_meaningful: false (regex)"),
+        "regex-generic stem must surface its source, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("filename_meaningful: ? (model)"),
+        "ambiguous stem must show that the model decides at caption time, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains(" -> "),
+        "old arrow output must be gone in dry-run, got: {stdout}"
+    );
+}
+
+#[test]
 fn caption_dry_run_does_not_require_credentials() {
     // Regression: dry-run never calls the network and must never require auth.
     let temp = tempfile::tempdir().unwrap();

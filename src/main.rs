@@ -562,20 +562,29 @@ fn cmd_caption(paths: &AppPaths, args: CaptionArgs) -> Result<()> {
     }
     if args.dry_run {
         for image in images {
+            let stem = image.path.file_stem().and_then(OsStr::to_str).unwrap_or("");
             println!("would caption {}", image.path.display());
+            match classify_filename(stem) {
+                NameClassification::Generic => {
+                    println!("  filename_meaningful: false (regex)");
+                }
+                NameClassification::NeedsModel => {
+                    println!("  filename_meaningful: ? (model)");
+                }
+            }
         }
         return Ok(());
     }
     let provider = build_provider(&config, args.provider, args.model.clone())?;
     for image in images {
         let stem = image.path.file_stem().and_then(OsStr::to_str).unwrap_or("");
-        let resolved_meaningful = match classify_filename(stem) {
-            NameClassification::Generic => Some(false),
+        let (resolved_meaningful, source) = match classify_filename(stem) {
+            NameClassification::Generic => (Some(false), "regex"),
             NameClassification::NeedsModel => match provider.classify_stem(stem) {
-                Ok(b) => Some(b),
+                Ok(b) => (Some(b), "model"),
                 Err(err) => {
                     log_error(paths, "classify_stem", err);
-                    None
+                    (None, "unknown")
                 }
             },
         };
@@ -592,7 +601,14 @@ fn cmd_caption(paths: &AppPaths, args: CaptionArgs) -> Result<()> {
                     filename_meaningful: resolved_meaningful,
                 };
                 append_jsonl(&paths.captions, &record)?;
-                println!("captioned {} -> {}", image.path.display(), record.title);
+                let meaningful_display = match record.filename_meaningful {
+                    Some(true) => "true",
+                    Some(false) => "false",
+                    None => "?",
+                };
+                println!("captioned {}", image.path.display());
+                println!("  title: {}", record.title);
+                println!("  filename_meaningful: {meaningful_display} ({source})");
             }
             Err(err) => {
                 log_error(paths, "caption", err);
