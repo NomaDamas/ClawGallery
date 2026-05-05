@@ -142,6 +142,9 @@ struct RenameArgs {
     /// Filename style.
     #[arg(long, value_enum, default_value_t = RenameStyle::DateTitle)]
     style: RenameStyle,
+    /// Rename even when the current filename looks human-meaningful.
+    #[arg(long)]
+    force: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -274,6 +277,8 @@ struct CaptionRecord {
     model: String,
     provider: String,
     created_at: DateTime<Utc>,
+    #[serde(default)]
+    filename_meaningful: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -297,6 +302,7 @@ struct ErrorRecord {
 struct CaptionOutput {
     title: String,
     description: String,
+    filename_meaningful: Option<bool>,
 }
 
 enum Provider {
@@ -305,10 +311,10 @@ enum Provider {
 }
 
 impl Provider {
-    fn caption_image(&self, path: &Path) -> Result<CaptionOutput> {
+    fn caption_image(&self, path: &Path, ask_meaningful: bool) -> Result<CaptionOutput> {
         match self {
-            Provider::OpenAiCompat(p) => p.caption_image(path),
-            Provider::Gemini(p) => p.caption_image(path),
+            Provider::OpenAiCompat(p) => p.caption_image(path, ask_meaningful),
+            Provider::Gemini(p) => p.caption_image(path, ask_meaningful),
         }
     }
 }
@@ -556,8 +562,16 @@ fn cmd_caption(paths: &AppPaths, args: CaptionArgs) -> Result<()> {
     }
     let provider = build_provider(&config, args.provider, args.model.clone())?;
     for image in images {
-        match provider.caption_image(&image.path) {
+        let stem = image.path.file_stem().and_then(OsStr::to_str).unwrap_or("");
+        let pre = classify_filename(stem);
+        let ask_meaningful = matches!(pre, NameClassification::NeedsModel);
+        match provider.caption_image(&image.path, ask_meaningful) {
             Ok(output) => {
+                let resolved_meaningful = match pre {
+                    NameClassification::Generic => Some(false),
+                    NameClassification::Meaningful => Some(true),
+                    NameClassification::NeedsModel => output.filename_meaningful,
+                };
                 let record = CaptionRecord {
                     image_id: image.id.clone(),
                     path: image.path.clone(),
@@ -566,6 +580,7 @@ fn cmd_caption(paths: &AppPaths, args: CaptionArgs) -> Result<()> {
                     model: effective_model.clone(),
                     provider: effective_provider.clone(),
                     created_at: Utc::now(),
+                    filename_meaningful: resolved_meaningful,
                 };
                 append_jsonl(&paths.captions, &record)?;
                 println!("captioned {} -> {}", image.path.display(), record.title);
@@ -586,6 +601,7 @@ fn cmd_rename(paths: &AppPaths, args: RenameArgs) -> Result<()> {
     let config = read_config(paths)?;
     let captions = latest_captions_by_path(paths)?;
     let mut images = latest_images(paths)?;
+    let explicit_file = args.file.is_some();
     if let Some(file) = args.file {
         let canonical = fs::canonicalize(&file).unwrap_or(file);
         images.retain(|image| image.path == canonical);
@@ -593,10 +609,22 @@ fn cmd_rename(paths: &AppPaths, args: RenameArgs) -> Result<()> {
             images.push(build_image_record(&canonical)?);
         }
     }
+    let mut renamed = 0_usize;
+    let mut skipped = 0_usize;
     for image in images {
         let Some(caption) = captions.get(&image.path) else {
             continue;
         };
+        let stem = image.path.file_stem().and_then(OsStr::to_str).unwrap_or("");
+        let decision =
+            rename_decision(stem, caption.filename_meaningful, explicit_file, args.force);
+        if decision == RenameDecision::Skip {
+            skipped += 1;
+            if !args.apply {
+                println!("would skip (meaningful filename) {}", image.path.display());
+            }
+            continue;
+        }
         let title = match args.style {
             RenameStyle::Title => caption.title.clone(),
             RenameStyle::Caption => caption.description.clone(),
@@ -635,6 +663,12 @@ fn cmd_rename(paths: &AppPaths, args: RenameArgs) -> Result<()> {
             append_jsonl(&paths.renames, &record)?;
             println!("dry-run {} -> {}", image.path.display(), target.display());
         }
+        renamed += 1;
+    }
+    if args.apply {
+        println!("renamed {renamed}, skipped {skipped} meaningful-looking name(s)");
+    } else if skipped > 0 {
+        println!("(would skip {skipped} meaningful-looking name(s); use --force to override)");
     }
     Ok(())
 }
@@ -934,7 +968,7 @@ impl OpenAiCompatProvider {
         }
     }
 
-    fn caption_image(&self, path: &Path) -> Result<CaptionOutput> {
+    fn caption_image(&self, path: &Path, ask_meaningful: bool) -> Result<CaptionOutput> {
         let image_data =
             fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
         let data_url = format!(
@@ -942,12 +976,13 @@ impl OpenAiCompatProvider {
             mime_for_path(path),
             base64::engine::general_purpose::STANDARD.encode(image_data)
         );
+        let prompt = build_caption_prompt(path, ask_meaningful);
         let request = json!({
             "model": self.model,
             "input": [{
                 "role": "user",
                 "content": [
-                    {"type": "input_text", "text": "You are ClawGallery. Analyze this screenshot/image and return compact JSON only: {\"title\":\"kebab or spaced concise filename title under 80 chars\",\"description\":\"detailed searchable caption with visible text, app/site, UI state, entities, and likely context\"}."},
+                    {"type": "input_text", "text": prompt},
                     {"type": "input_image", "image_url": data_url}
                 ]
             }],
@@ -980,14 +1015,15 @@ impl GeminiProvider {
         }
     }
 
-    fn caption_image(&self, path: &Path) -> Result<CaptionOutput> {
+    fn caption_image(&self, path: &Path, ask_meaningful: bool) -> Result<CaptionOutput> {
         let image_data =
             fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
         let b64 = base64::engine::general_purpose::STANDARD.encode(image_data);
+        let prompt = build_caption_prompt(path, ask_meaningful);
         let request = json!({
             "contents": [{
                 "parts": [
-                    {"text": "You are ClawGallery. Analyze this screenshot/image and return compact JSON only: {\"title\":\"kebab or spaced concise filename title under 80 chars\",\"description\":\"detailed searchable caption with visible text, app/site, UI state, entities, and likely context\"}."},
+                    {"text": prompt},
                     {"inline_data": {"mime_type": mime_for_path(path), "data": b64}}
                 ]
             }]
@@ -1013,6 +1049,28 @@ impl GeminiProvider {
             .map(ToOwned::to_owned)
             .ok_or_else(|| anyhow!("Gemini response did not include text"))?;
         parse_caption_text(&text)
+    }
+}
+
+fn build_caption_prompt(path: &Path, ask_meaningful: bool) -> String {
+    let stem = path
+        .file_stem()
+        .and_then(OsStr::to_str)
+        .unwrap_or("")
+        .to_string();
+    if ask_meaningful {
+        format!(
+            "You are ClawGallery. Analyze this screenshot/image and return compact JSON only: \
+             {{\"title\":\"kebab or spaced concise filename title under 80 chars\",\
+             \"description\":\"detailed searchable caption with visible text, app/site, UI state, entities, and likely context\",\
+             \"filename_meaningful\": <true if the current filename stem '{stem}' was clearly chosen by a human to describe THIS specific image content; \
+             false if it looks auto-generated, placeholder, or unrelated to the image>}}."
+        )
+    } else {
+        "You are ClawGallery. Analyze this screenshot/image and return compact JSON only: \
+         {\"title\":\"kebab or spaced concise filename title under 80 chars\",\
+         \"description\":\"detailed searchable caption with visible text, app/site, UI state, entities, and likely context\"}."
+            .to_string()
     }
 }
 
@@ -1049,6 +1107,7 @@ fn parse_caption_text(text: &str) -> Result<CaptionOutput> {
             .unwrap_or_default()
             .trim()
             .to_string(),
+        filename_meaningful: value.get("filename_meaningful").and_then(Value::as_bool),
     })
 }
 
@@ -1103,6 +1162,113 @@ fn rename_candidate(path: &Path, title: &str, limit_bytes: usize) -> Result<Path
         "could not find non-colliding filename for {}",
         path.display()
     )
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum NameClassification {
+    Generic,
+    Meaningful,
+    NeedsModel,
+}
+
+fn strip_copy_and_sequence_suffix(stem: &str) -> &str {
+    let copy_re = regex::Regex::new(r"(?i)(?:[ _-](?:copy|복사본|사본)(?:[ _-]?\d+)?| \(\d+\))+$")
+        .expect("copy suffix regex compiles");
+    let trimmed = copy_re.replace(stem, "");
+    let len = trimmed.len();
+    &stem[..len.min(stem.len())]
+}
+
+fn is_generic_filename(stem: &str) -> bool {
+    let stem = strip_copy_and_sequence_suffix(stem.trim()).trim();
+    if stem.is_empty() {
+        return true;
+    }
+
+    let patterns: &[&str] = &[
+        r"^\d+$",
+        r"(?i)^(?:image|download|img|photo|picture|untitled)$",
+        r"(?i)^(?:image|download|img|photo|picture)\s*\(\d+\)$",
+        r"^(?:Screenshot|Screen Shot|Annotation|Captura de pantalla|Снимок экрана|스크린샷|화면 캡처)\s\d{4}-\d{2}-\d{2}(?:[ T]| at | a las )\d{1,2}[.: -]\d{2}[.: -]\d{2}(?:\s?(?:AM|PM))?$",
+        r"^WhatsApp\s(?:Image|Video)\s\d{4}-\d{2}-\d{2}\sat\s\d{1,2}[.: ]\d{2}[.: ]\d{2}$",
+        r"^KakaoTalk_\d{8}_\d{6,9}$",
+        r"^PXL_\d{8}_\d{9}(?:~\d+)?$",
+        r"^(?:IMG|VID)_\d{8}_\d{6}(?:_\d{1,3})?$",
+        r"^(?:IMG|VID)[-_]\d{8}[-_]?WA\d{2,6}$",
+        r"^(?:DSC|DSCF|DSCN)\d{4,8}(?:_\d{1,6}px)?$",
+        r"^IMG_\d{4,5}(?:[ _]Medium| Large| Small| HEIC)?$",
+        r"^\d{8}_\d{6}(?:_\d{1,4})?$",
+    ];
+    for pat in patterns {
+        let re = regex::Regex::new(pat).expect("classifier regex compiles");
+        if re.is_match(stem) {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_clearly_meaningful_filename(stem: &str) -> bool {
+    let stem = stem.trim();
+    if stem.is_empty() {
+        return false;
+    }
+    if stem.chars().any(|c| matches!(c, '가'..='힣')) {
+        return true;
+    }
+    let words: Vec<&str> = stem
+        .split([' ', '_', '-'])
+        .filter(|w| !w.is_empty())
+        .collect();
+    if words.len() < 2 {
+        return false;
+    }
+    let long_alpha_words = words
+        .iter()
+        .filter(|w| {
+            w.chars().count() >= 5 && w.chars().all(|c| c.is_alphabetic() && !c.is_ascii_digit())
+        })
+        .count();
+    long_alpha_words >= 2
+}
+
+fn classify_filename(stem: &str) -> NameClassification {
+    if is_generic_filename(stem) {
+        return NameClassification::Generic;
+    }
+    if is_clearly_meaningful_filename(stem) {
+        return NameClassification::Meaningful;
+    }
+    NameClassification::NeedsModel
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum RenameDecision {
+    Rename,
+    Skip,
+}
+
+fn rename_decision(
+    stem: &str,
+    cached_filename_meaningful: Option<bool>,
+    explicit_file: bool,
+    force: bool,
+) -> RenameDecision {
+    if explicit_file || force {
+        return RenameDecision::Rename;
+    }
+    if let Some(meaningful) = cached_filename_meaningful {
+        return if meaningful {
+            RenameDecision::Skip
+        } else {
+            RenameDecision::Rename
+        };
+    }
+    match classify_filename(stem) {
+        NameClassification::Generic => RenameDecision::Rename,
+        NameClassification::Meaningful => RenameDecision::Skip,
+        NameClassification::NeedsModel => RenameDecision::Skip,
+    }
 }
 
 fn sanitize_filename(input: &str) -> String {
@@ -1284,6 +1450,166 @@ mod tests {
     #[test]
     fn config_model_used_when_cli_absent() {
         assert_eq!(resolve_model(None, "gpt-4.1-mini"), "gpt-4.1-mini");
+    }
+
+    #[test]
+    fn is_generic_filename_detects_known_machine_patterns() {
+        let generic = [
+            "IMG_0034",
+            "IMG_3963",
+            "IMG_0621 Medium",
+            "DSC04551",
+            "DSCF1234",
+            "DSCN0001",
+            "PXL_20240316_080000123",
+            "PXL_20240316_080000123~2",
+            "Screenshot 2025-11-01 at 14.32.55",
+            "Screen Shot 2025-11-01 at 2.32.55 PM",
+            "Captura de pantalla 2024-03-16 a las 8.00.00",
+            "WhatsApp Image 2024-03-16 at 08.00.00",
+            "WhatsApp Image 2024-03-16 at 08.00.00 (1)",
+            "KakaoTalk_20231109_221206834",
+            "KakaoTalk_20231109_221206834 (2)",
+            "IMG-20231124-WA0001",
+            "IMG_20230915_123456",
+            "VID_20230915_123456_001",
+            "20230822_120055",
+            "20230822_120055_001",
+            "1696862563748",
+            "1000010690",
+            "image (1)",
+            "image (12)",
+            "download (3)",
+            "Untitled",
+            "untitled",
+            "IMG_0034 copy",
+            "IMG_0034 copy 2",
+            "image (1) copy",
+        ];
+        for stem in generic {
+            assert!(
+                is_generic_filename(stem),
+                "expected generic, but classifier said meaningful: {stem:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_generic_filename_preserves_meaningful_names() {
+        let meaningful = [
+            "Eva-William",
+            "기아 승리 열차",
+            "마데이라_노마드",
+            "김동규_jeffrey_AWS_발표",
+            "홍창기",
+            "꼴데",
+            "수능_국어_상위_5%_차트",
+            "screenshot-payment-flow",
+            "DSC_2024_summer_trip",
+            "IMG_0034_beach",
+            "image-final-cover",
+            "report-q3",
+        ];
+        for stem in meaningful {
+            assert!(
+                !is_generic_filename(stem),
+                "expected meaningful, but classifier said generic: {stem:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pure_numeric_stems_are_generic() {
+        for stem in ["2024", "12345", "1000010690", "1696862563748"] {
+            assert!(
+                is_generic_filename(stem),
+                "pure-numeric stem {stem:?} must be generic per user policy"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_filename_returns_three_states() {
+        assert_eq!(classify_filename("IMG_0034"), NameClassification::Generic);
+        assert_eq!(
+            classify_filename("1696862563748"),
+            NameClassification::Generic
+        );
+        assert_eq!(
+            classify_filename("기아 승리 열차"),
+            NameClassification::Meaningful
+        );
+        assert_eq!(
+            classify_filename("Eva-William"),
+            NameClassification::NeedsModel
+        );
+        assert_eq!(
+            classify_filename("test-image"),
+            NameClassification::NeedsModel
+        );
+        assert_eq!(
+            classify_filename("DSC_2024_summer_trip"),
+            NameClassification::NeedsModel
+        );
+        assert_eq!(
+            classify_filename("김동규_jeffrey_AWS_발표"),
+            NameClassification::Meaningful
+        );
+    }
+
+    #[test]
+    fn rename_decision_renames_generic_by_default() {
+        assert_eq!(
+            rename_decision("IMG_0034", None, false, false),
+            RenameDecision::Rename
+        );
+    }
+
+    #[test]
+    fn rename_decision_skips_meaningful_by_default() {
+        assert_eq!(
+            rename_decision("기아 승리 열차", None, false, false),
+            RenameDecision::Skip
+        );
+    }
+
+    #[test]
+    fn rename_decision_force_overrides_skip() {
+        assert_eq!(
+            rename_decision("기아 승리 열차", None, false, true),
+            RenameDecision::Rename
+        );
+    }
+
+    #[test]
+    fn rename_decision_explicit_file_overrides_skip() {
+        assert_eq!(
+            rename_decision("Eva-William", None, true, false),
+            RenameDecision::Rename
+        );
+    }
+
+    #[test]
+    fn rename_decision_uses_cached_model_answer() {
+        assert_eq!(
+            rename_decision("Eva-William", Some(true), false, false),
+            RenameDecision::Skip,
+            "cached meaningful=true should win over local heuristic"
+        );
+        assert_eq!(
+            rename_decision("Eva-William", Some(false), false, false),
+            RenameDecision::Rename,
+            "cached meaningful=false should win over local heuristic"
+        );
+    }
+
+    #[test]
+    fn rename_decision_skips_needs_model_when_no_cache() {
+        assert_eq!(
+            rename_decision("test-image", None, false, false),
+            RenameDecision::Skip,
+            "ambiguous names without a cached model answer must be skipped conservatively"
+        );
     }
 
     #[test]

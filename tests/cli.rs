@@ -100,7 +100,8 @@ fn rename_accepts_explicit_dry_run_flag() {
         "description": "A searchable settings screenshot",
         "model": "test",
         "provider": "test",
-        "created_at": "2026-05-03T00:00:00Z"
+        "created_at": "2026-05-03T00:00:00Z",
+        "filename_meaningful": false
     });
     fs::write(config.join("captions.jsonl"), format!("{}\n", caption)).unwrap();
 
@@ -305,6 +306,177 @@ fn search_and_status_ignore_pruned_records() {
     assert!(
         !search_ghost.contains("ghost.png"),
         "pruned (active=false) records must not appear in search, got: {search_ghost}"
+    );
+}
+
+fn inject_caption(
+    config: &Path,
+    image_path: &Path,
+    image_id: &str,
+    title: &str,
+    filename_meaningful: Option<bool>,
+) {
+    let mut record = serde_json::json!({
+        "image_id": image_id,
+        "path": image_path,
+        "title": title,
+        "description": format!("test description for {title}"),
+        "model": "test",
+        "provider": "test",
+        "created_at": "2026-05-04T00:00:00Z",
+    });
+    if let Some(b) = filename_meaningful {
+        record["filename_meaningful"] = serde_json::Value::Bool(b);
+    }
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(config.join("captions.jsonl"))
+        .unwrap();
+    use std::io::Write;
+    writeln!(file, "{record}").unwrap();
+}
+
+fn first_image_id(config: &Path) -> String {
+    let line = fs::read_to_string(config.join("images.jsonl")).unwrap();
+    let rec: serde_json::Value = serde_json::from_str(line.lines().next().unwrap()).unwrap();
+    rec["id"].as_str().unwrap().to_string()
+}
+
+#[test]
+fn rename_skips_meaningful_filenames_by_default() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).unwrap();
+    let img = images.join("기아 승리 열차.png");
+    fs::write(&img, b"x").unwrap();
+    assert_success(run(&config, &["init"]));
+    assert_success(run(&config, &["folder", "add", images.to_str().unwrap()]));
+    assert_success(run(&config, &["bootstrap"]));
+    let canonical = img.canonicalize().unwrap();
+    let id = first_image_id(&config);
+    inject_caption(&config, &canonical, &id, "Some Caption Title", None);
+
+    let dry = assert_success(run(&config, &["rename", "--dry-run"]));
+    assert!(
+        dry.contains("would skip"),
+        "regex-meaningful Hangul name must trigger skip, got: {dry}"
+    );
+    assert!(
+        !dry.contains("dry-run "),
+        "no actual dry-run rename line should be emitted, got: {dry}"
+    );
+}
+
+#[test]
+fn rename_renames_generic_filenames_by_default() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).unwrap();
+    let img = images.join("IMG_0034.png");
+    fs::write(&img, b"x").unwrap();
+    assert_success(run(&config, &["init"]));
+    assert_success(run(&config, &["folder", "add", images.to_str().unwrap()]));
+    assert_success(run(&config, &["bootstrap"]));
+    let canonical = img.canonicalize().unwrap();
+    let id = first_image_id(&config);
+    inject_caption(&config, &canonical, &id, "Cute Cat Doodle", None);
+
+    let dry = assert_success(run(&config, &["rename", "--dry-run", "--style", "title"]));
+    assert!(
+        dry.contains("dry-run"),
+        "generic stem should produce a dry-run rename, got: {dry}"
+    );
+    assert!(dry.contains("cute-cat-doodle"));
+}
+
+#[test]
+fn rename_force_overrides_skip() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).unwrap();
+    let img = images.join("기아 승리 열차.png");
+    fs::write(&img, b"x").unwrap();
+    assert_success(run(&config, &["init"]));
+    assert_success(run(&config, &["folder", "add", images.to_str().unwrap()]));
+    assert_success(run(&config, &["bootstrap"]));
+    let canonical = img.canonicalize().unwrap();
+    let id = first_image_id(&config);
+    inject_caption(&config, &canonical, &id, "Forced Title", None);
+
+    let dry = assert_success(run(
+        &config,
+        &["rename", "--dry-run", "--force", "--style", "title"],
+    ));
+    assert!(
+        dry.contains("dry-run"),
+        "--force must rename even meaningful names, got: {dry}"
+    );
+    assert!(dry.contains("forced-title"));
+}
+
+#[test]
+fn rename_explicit_file_overrides_skip() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).unwrap();
+    let img = images.join("기아 승리 열차.png");
+    fs::write(&img, b"x").unwrap();
+    assert_success(run(&config, &["init"]));
+    assert_success(run(&config, &["folder", "add", images.to_str().unwrap()]));
+    assert_success(run(&config, &["bootstrap"]));
+    let canonical = img.canonicalize().unwrap();
+    let id = first_image_id(&config);
+    inject_caption(&config, &canonical, &id, "Explicit File Title", None);
+
+    let dry = assert_success(run(
+        &config,
+        &[
+            "rename",
+            "--dry-run",
+            "--file",
+            canonical.to_str().unwrap(),
+            "--style",
+            "title",
+        ],
+    ));
+    assert!(
+        dry.contains("dry-run"),
+        "--file must rename even meaningful names, got: {dry}"
+    );
+}
+
+#[test]
+fn rename_uses_cached_filename_meaningful_from_caption() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).unwrap();
+    let img = images.join("test-image.png");
+    fs::write(&img, b"x").unwrap();
+    assert_success(run(&config, &["init"]));
+    assert_success(run(&config, &["folder", "add", images.to_str().unwrap()]));
+    assert_success(run(&config, &["bootstrap"]));
+    let canonical = img.canonicalize().unwrap();
+    let id = first_image_id(&config);
+    inject_caption(&config, &canonical, &id, "From Cache False", Some(false));
+
+    let dry = assert_success(run(&config, &["rename", "--dry-run", "--style", "title"]));
+    assert!(
+        dry.contains("dry-run"),
+        "cached filename_meaningful=false must trigger rename, got: {dry}"
+    );
+
+    fs::write(config.join("captions.jsonl"), "").unwrap();
+    inject_caption(&config, &canonical, &id, "From Cache True", Some(true));
+    let dry2 = assert_success(run(&config, &["rename", "--dry-run", "--style", "title"]));
+    assert!(
+        dry2.contains("would skip"),
+        "cached filename_meaningful=true must trigger skip, got: {dry2}"
     );
 }
 

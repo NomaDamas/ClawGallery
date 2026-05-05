@@ -87,7 +87,7 @@ clawgallery folder list
 clawgallery bootstrap [--folder <id>] [--path <path>] [--prune]
 clawgallery poll [--once] [--interval <seconds>] [--prune]
 clawgallery caption [--missing] [--file <path>] [--dry-run] [--model <model>] [--provider <provider>]
-clawgallery rename [--apply] [--file <path>] [--style title|caption|date-title]
+clawgallery rename [--apply] [--dry-run] [--file <path>] [--style title|caption|date-title] [--force]
 clawgallery search <keywords...> [--limit <n>]
 clawgallery status
 clawgallery skill path|print
@@ -96,3 +96,12 @@ clawgallery skill path|print
 ## Rename safety
 
 Rename is dry-run by default. `--apply` is required to modify files. ClawGallery strips unsafe filename characters, preserves extensions, reserves suffix space for collisions, and refuses to overwrite existing files.
+
+### Meaningful-filename gate
+
+`rename` skips files whose current name already looks human-meaningful and only renames stems that look auto-generated (`IMG_0034`, `PXL_20240316_080000123`, `Screenshot 2025-11-01 at 14.32.55`, `1696862563748`, `image (1)`, etc.). Classification runs in two tiers:
+
+1. A pure local regex covers ~11 well-known camera, screenshot, and messenger families plus pure numeric stems.
+2. Stems that are not obviously generic and not obviously human-authored are tagged `NeedsModel`; the visual model is asked once during `caption` whether the stem describes the image, and the answer is cached in `captions.jsonl` (`filename_meaningful: bool`) so future `rename` runs skip the call.
+
+Pass `--force` to rename every captioned image regardless of name, or `--file <path>` to rename a single explicit target without consulting the gate.
