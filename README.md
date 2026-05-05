@@ -101,7 +101,7 @@ Rename is dry-run by default. `--apply` is required to modify files. ClawGallery
 
 `rename` skips files whose current name already looks human-meaningful and only renames stems that look auto-generated (`IMG_0034`, `PXL_20240316_080000123`, `Screenshot 2025-11-01 at 14.32.55`, `1696862563748`, `image (1)`, etc.). Classification runs in two tiers:
 
-1. A pure local regex covers ~11 well-known camera, screenshot, and messenger families plus pure numeric stems.
-2. Stems that are not obviously generic and not obviously human-authored are tagged `NeedsModel`; the visual model is asked once during `caption` whether the stem describes the image, and the answer is cached in `captions.jsonl` (`filename_meaningful: bool`) so future `rename` runs skip the call.
+1. A pure local regex covers ~12 well-known camera, screenshot, messenger, and download families plus pure numeric stems and copy/sequence suffixes. A regex match means `Generic` and the stem is renamed without any model call.
+2. Anything that does not match the regex is tagged `NeedsModel`. During `caption`, ClawGallery makes a separate text-only model call that sees only the filename stem (no image content) and asks whether the stem looks human-authored or auto-generated. The boolean is cached in `captions.jsonl` (`filename_meaningful: bool`) so future `rename` runs reuse the answer.
 
 Pass `--force` to rename every captioned image regardless of name, or `--file <path>` to rename a single explicit target without consulting the gate.

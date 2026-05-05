@@ -302,7 +302,6 @@ struct ErrorRecord {
 struct CaptionOutput {
     title: String,
     description: String,
-    filename_meaningful: Option<bool>,
 }
 
 enum Provider {
@@ -311,10 +310,17 @@ enum Provider {
 }
 
 impl Provider {
-    fn caption_image(&self, path: &Path, ask_meaningful: bool) -> Result<CaptionOutput> {
+    fn caption_image(&self, path: &Path) -> Result<CaptionOutput> {
         match self {
-            Provider::OpenAiCompat(p) => p.caption_image(path, ask_meaningful),
-            Provider::Gemini(p) => p.caption_image(path, ask_meaningful),
+            Provider::OpenAiCompat(p) => p.caption_image(path),
+            Provider::Gemini(p) => p.caption_image(path),
+        }
+    }
+
+    fn classify_stem(&self, stem: &str) -> Result<bool> {
+        match self {
+            Provider::OpenAiCompat(p) => p.classify_stem(stem),
+            Provider::Gemini(p) => p.classify_stem(stem),
         }
     }
 }
@@ -563,15 +569,18 @@ fn cmd_caption(paths: &AppPaths, args: CaptionArgs) -> Result<()> {
     let provider = build_provider(&config, args.provider, args.model.clone())?;
     for image in images {
         let stem = image.path.file_stem().and_then(OsStr::to_str).unwrap_or("");
-        let pre = classify_filename(stem);
-        let ask_meaningful = matches!(pre, NameClassification::NeedsModel);
-        match provider.caption_image(&image.path, ask_meaningful) {
+        let resolved_meaningful = match classify_filename(stem) {
+            NameClassification::Generic => Some(false),
+            NameClassification::NeedsModel => match provider.classify_stem(stem) {
+                Ok(b) => Some(b),
+                Err(err) => {
+                    log_error(paths, "classify_stem", err);
+                    None
+                }
+            },
+        };
+        match provider.caption_image(&image.path) {
             Ok(output) => {
-                let resolved_meaningful = match pre {
-                    NameClassification::Generic => Some(false),
-                    NameClassification::Meaningful => Some(true),
-                    NameClassification::NeedsModel => output.filename_meaningful,
-                };
                 let record = CaptionRecord {
                     image_id: image.id.clone(),
                     path: image.path.clone(),
@@ -968,7 +977,7 @@ impl OpenAiCompatProvider {
         }
     }
 
-    fn caption_image(&self, path: &Path, ask_meaningful: bool) -> Result<CaptionOutput> {
+    fn caption_image(&self, path: &Path) -> Result<CaptionOutput> {
         let image_data =
             fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
         let data_url = format!(
@@ -976,13 +985,12 @@ impl OpenAiCompatProvider {
             mime_for_path(path),
             base64::engine::general_purpose::STANDARD.encode(image_data)
         );
-        let prompt = build_caption_prompt(path, ask_meaningful);
         let request = json!({
             "model": self.model,
             "input": [{
                 "role": "user",
                 "content": [
-                    {"type": "input_text", "text": prompt},
+                    {"type": "input_text", "text": caption_prompt()},
                     {"type": "input_image", "image_url": data_url}
                 ]
             }],
@@ -997,6 +1005,28 @@ impl OpenAiCompatProvider {
             .error_for_status()?
             .json()?;
         parse_caption_response(&response)
+    }
+
+    fn classify_stem(&self, stem: &str) -> Result<bool> {
+        let request = json!({
+            "model": self.model,
+            "input": [{
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": stem_classify_prompt(stem)}
+                ]
+            }],
+            "max_output_tokens": 50
+        });
+        let url = format!("{}/responses", self.base_url.trim_end_matches('/'));
+        let response: Value = reqwest::blocking::Client::new()
+            .post(url)
+            .bearer_auth(&self.auth.bearer)
+            .json(&request)
+            .send()?
+            .error_for_status()?
+            .json()?;
+        parse_stem_classification(&response)
     }
 }
 
@@ -1015,15 +1045,14 @@ impl GeminiProvider {
         }
     }
 
-    fn caption_image(&self, path: &Path, ask_meaningful: bool) -> Result<CaptionOutput> {
+    fn caption_image(&self, path: &Path) -> Result<CaptionOutput> {
         let image_data =
             fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
         let b64 = base64::engine::general_purpose::STANDARD.encode(image_data);
-        let prompt = build_caption_prompt(path, ask_meaningful);
         let request = json!({
             "contents": [{
                 "parts": [
-                    {"text": prompt},
+                    {"text": caption_prompt()},
                     {"inline_data": {"mime_type": mime_for_path(path), "data": b64}}
                 ]
             }]
@@ -1038,40 +1067,65 @@ impl GeminiProvider {
             .send()?
             .error_for_status()?
             .json()?;
-        let text = response
-            .get("candidates")
-            .and_then(|c| c.as_array()?.first())
-            .and_then(|c| c.get("content"))
-            .and_then(|c| c.get("parts"))
-            .and_then(|p| p.as_array()?.first())
-            .and_then(|p| p.get("text"))
-            .and_then(|t| t.as_str())
-            .map(ToOwned::to_owned)
-            .ok_or_else(|| anyhow!("Gemini response did not include text"))?;
+        let text = gemini_text(&response)?;
         parse_caption_text(&text)
+    }
+
+    fn classify_stem(&self, stem: &str) -> Result<bool> {
+        let request = json!({
+            "contents": [{
+                "parts": [{"text": stem_classify_prompt(stem)}]
+            }]
+        });
+        let url = format!(
+            "{}/models/{}:generateContent?key={}",
+            self.base_url, self.model, self.api_key
+        );
+        let response: Value = reqwest::blocking::Client::new()
+            .post(&url)
+            .json(&request)
+            .send()?
+            .error_for_status()?
+            .json()?;
+        let text = gemini_text(&response)?;
+        parse_stem_classification_text(&text)
     }
 }
 
-fn build_caption_prompt(path: &Path, ask_meaningful: bool) -> String {
-    let stem = path
-        .file_stem()
-        .and_then(OsStr::to_str)
-        .unwrap_or("")
-        .to_string();
-    if ask_meaningful {
-        format!(
-            "You are ClawGallery. Analyze this screenshot/image and return compact JSON only: \
-             {{\"title\":\"kebab or spaced concise filename title under 80 chars\",\
-             \"description\":\"detailed searchable caption with visible text, app/site, UI state, entities, and likely context\",\
-             \"filename_meaningful\": <true if the current filename stem '{stem}' was clearly chosen by a human to describe THIS specific image content; \
-             false if it looks auto-generated, placeholder, or unrelated to the image>}}."
-        )
-    } else {
-        "You are ClawGallery. Analyze this screenshot/image and return compact JSON only: \
-         {\"title\":\"kebab or spaced concise filename title under 80 chars\",\
-         \"description\":\"detailed searchable caption with visible text, app/site, UI state, entities, and likely context\"}."
-            .to_string()
-    }
+fn gemini_text(response: &Value) -> Result<String> {
+    response
+        .get("candidates")
+        .and_then(|c| c.as_array()?.first())
+        .and_then(|c| c.get("content"))
+        .and_then(|c| c.get("parts"))
+        .and_then(|p| p.as_array()?.first())
+        .and_then(|p| p.get("text"))
+        .and_then(|t| t.as_str())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| anyhow!("Gemini response did not include text"))
+}
+
+fn caption_prompt() -> &'static str {
+    "You are ClawGallery. Analyze this screenshot/image and return compact JSON only: \
+     {\"title\":\"kebab or spaced concise filename title under 80 chars\",\
+     \"description\":\"detailed searchable caption with visible text, app/site, UI state, entities, and likely context\"}."
+}
+
+fn stem_classify_prompt(stem: &str) -> String {
+    format!(
+        "You are classifying a single filename stem. \
+         Return compact JSON only: {{\"meaningful\": <true|false>}}. \
+         Do not look at, request, or imagine any image content. \
+         Decide purely from the filename text. \
+         Set meaningful=false ONLY if the stem looks auto-generated by a camera, screenshot tool, \
+         messenger, browser download, or platform (e.g. IMG_0034, DSC04551, PXL_20240316_080000123, \
+         Screenshot 2025-11-01 at 14.32.55, WhatsApp Image 2024-03-16 at 08.00.00, \
+         KakaoTalk_20231109_221206834, image (1), Untitled, 1696862563748, 20230822_120055). \
+         Set meaningful=true for any stem a human likely chose deliberately, including descriptive \
+         English, names of people/teams/places, slang, project codenames, or non-Latin scripts \
+         (Korean Hangul, Japanese, Chinese, Cyrillic, Arabic, etc.). When uncertain, prefer meaningful=true. \
+         Stem to classify: {stem:?}"
+    )
 }
 
 fn parse_caption_response(response: &Value) -> Result<CaptionOutput> {
@@ -1107,8 +1161,33 @@ fn parse_caption_text(text: &str) -> Result<CaptionOutput> {
             .unwrap_or_default()
             .trim()
             .to_string(),
-        filename_meaningful: value.get("filename_meaningful").and_then(Value::as_bool),
     })
+}
+
+fn parse_stem_classification(response: &Value) -> Result<bool> {
+    let text = response
+        .get("output_text")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| collect_response_text(response));
+    let text = text.ok_or_else(|| anyhow!("model response did not include output_text"))?;
+    parse_stem_classification_text(&text)
+}
+
+fn parse_stem_classification_text(text: &str) -> Result<bool> {
+    let value: Value = serde_json::from_str(text.trim()).or_else(|_| {
+        let start = text
+            .find('{')
+            .ok_or_else(|| anyhow!("stem classification response was not JSON"))?;
+        let end = text
+            .rfind('}')
+            .ok_or_else(|| anyhow!("stem classification response was not JSON"))?;
+        serde_json::from_str(&text[start..=end]).map_err(anyhow::Error::from)
+    })?;
+    value
+        .get("meaningful")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| anyhow!("stem classification response did not include meaningful"))
 }
 
 fn collect_response_text(response: &Value) -> Option<String> {
@@ -1167,7 +1246,6 @@ fn rename_candidate(path: &Path, title: &str, limit_bytes: usize) -> Result<Path
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum NameClassification {
     Generic,
-    Meaningful,
     NeedsModel,
 }
 
@@ -1208,38 +1286,12 @@ fn is_generic_filename(stem: &str) -> bool {
     false
 }
 
-fn is_clearly_meaningful_filename(stem: &str) -> bool {
-    let stem = stem.trim();
-    if stem.is_empty() {
-        return false;
-    }
-    if stem.chars().any(|c| matches!(c, '가'..='힣')) {
-        return true;
-    }
-    let words: Vec<&str> = stem
-        .split([' ', '_', '-'])
-        .filter(|w| !w.is_empty())
-        .collect();
-    if words.len() < 2 {
-        return false;
-    }
-    let long_alpha_words = words
-        .iter()
-        .filter(|w| {
-            w.chars().count() >= 5 && w.chars().all(|c| c.is_alphabetic() && !c.is_ascii_digit())
-        })
-        .count();
-    long_alpha_words >= 2
-}
-
 fn classify_filename(stem: &str) -> NameClassification {
     if is_generic_filename(stem) {
-        return NameClassification::Generic;
+        NameClassification::Generic
+    } else {
+        NameClassification::NeedsModel
     }
-    if is_clearly_meaningful_filename(stem) {
-        return NameClassification::Meaningful;
-    }
-    NameClassification::NeedsModel
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -1266,7 +1318,6 @@ fn rename_decision(
     }
     match classify_filename(stem) {
         NameClassification::Generic => RenameDecision::Rename,
-        NameClassification::Meaningful => RenameDecision::Skip,
         NameClassification::NeedsModel => RenameDecision::Skip,
     }
 }
@@ -1393,6 +1444,24 @@ mod tests {
     }
 
     #[test]
+    fn parses_stem_classification_true() {
+        let json = r#"{"meaningful": true}"#;
+        assert!(parse_stem_classification_text(json).unwrap());
+    }
+
+    #[test]
+    fn parses_stem_classification_false_with_padding() {
+        let wrapped = "Sure: {\"meaningful\": false} -- done.";
+        assert!(!parse_stem_classification_text(wrapped).unwrap());
+    }
+
+    #[test]
+    fn rejects_stem_classification_without_field() {
+        let json = r#"{"foo": true}"#;
+        assert!(parse_stem_classification_text(json).is_err());
+    }
+
+    #[test]
     fn parses_caption_text_directly() {
         let text = r#"{"title":"Gemini result","description":"A Gemini-generated description"}"#;
         let parsed = parse_caption_text(text).unwrap();
@@ -1495,8 +1564,8 @@ mod tests {
     }
 
     #[test]
-    fn is_generic_filename_preserves_meaningful_names() {
-        let meaningful = [
+    fn is_generic_filename_does_not_match_human_authored_names() {
+        let not_generic = [
             "Eva-William",
             "기아 승리 열차",
             "마데이라_노마드",
@@ -1509,11 +1578,12 @@ mod tests {
             "IMG_0034_beach",
             "image-final-cover",
             "report-q3",
+            "test-image",
         ];
-        for stem in meaningful {
+        for stem in not_generic {
             assert!(
                 !is_generic_filename(stem),
-                "expected meaningful, but classifier said generic: {stem:?}"
+                "regex must not match human-authored stems: {stem:?}"
             );
         }
     }
@@ -1529,32 +1599,26 @@ mod tests {
     }
 
     #[test]
-    fn classify_filename_returns_three_states() {
+    fn classify_filename_only_generic_or_needs_model() {
         assert_eq!(classify_filename("IMG_0034"), NameClassification::Generic);
         assert_eq!(
             classify_filename("1696862563748"),
             NameClassification::Generic
         );
-        assert_eq!(
-            classify_filename("기아 승리 열차"),
-            NameClassification::Meaningful
-        );
-        assert_eq!(
-            classify_filename("Eva-William"),
-            NameClassification::NeedsModel
-        );
-        assert_eq!(
-            classify_filename("test-image"),
-            NameClassification::NeedsModel
-        );
-        assert_eq!(
-            classify_filename("DSC_2024_summer_trip"),
-            NameClassification::NeedsModel
-        );
-        assert_eq!(
-            classify_filename("김동규_jeffrey_AWS_발표"),
-            NameClassification::Meaningful
-        );
+        for ambiguous in [
+            "기아 승리 열차",
+            "마데이라_노마드",
+            "Eva-William",
+            "test-image",
+            "DSC_2024_summer_trip",
+            "김동규_jeffrey_AWS_발표",
+        ] {
+            assert_eq!(
+                classify_filename(ambiguous),
+                NameClassification::NeedsModel,
+                "anything not regex-generic must be delegated to the model: {ambiguous:?}"
+            );
+        }
     }
 
     #[test]
@@ -1566,9 +1630,13 @@ mod tests {
     }
 
     #[test]
-    fn rename_decision_skips_meaningful_by_default() {
+    fn rename_decision_skips_unknown_stems_without_cached_answer() {
         assert_eq!(
             rename_decision("기아 승리 열차", None, false, false),
+            RenameDecision::Skip
+        );
+        assert_eq!(
+            rename_decision("Eva-William", None, false, false),
             RenameDecision::Skip
         );
     }

@@ -49,7 +49,7 @@ Apply rename only after reviewing dry-run output:
 clawgallery rename --apply
 ```
 
-`rename` skips files whose current name already looks human-meaningful (Hangul names, multi-word descriptive English, etc.) and only renames stems that look auto-generated (`IMG_0034`, `PXL_20240316_080000123`, `Screenshot 2025-11-01 at 14.32.55`, `1696862563748`, `image (1)`). Local regex handles known camera/screenshot/messenger families; ambiguous stems are classified by the visual model during `caption` and cached as `filename_meaningful` in `captions.jsonl`. Pass `--force` to override the gate for the whole batch, or `--file <path>` for a single explicit target.
+`rename` skips files whose current name already looks human-meaningful and only renames stems that look auto-generated (`IMG_0034`, `PXL_20240316_080000123`, `Screenshot 2025-11-01 at 14.32.55`, `1696862563748`, `image (1)`). Local regex handles known camera/screenshot/messenger families. Anything that does not match the regex triggers a separate text-only model call during `caption` that judges the filename stem on its own (no image content involved). The boolean is cached as `filename_meaningful` in `captions.jsonl`. Pass `--force` to override the gate for the whole batch, or `--file <path>` for a single explicit target.
 
 Poll once for newly added images:
 
