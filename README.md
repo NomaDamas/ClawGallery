@@ -97,6 +97,8 @@ clawgallery skill path|print
 
 Rename is dry-run by default. `--apply` is required to modify files. ClawGallery strips unsafe filename characters, preserves extensions, reserves suffix space for collisions, and refuses to overwrite existing files.
 
+When `rename --apply` encounters a tracked path that no longer exists on disk (already renamed, deleted externally, etc.) it prints `would skip (missing source) <path>`, appends an `active=false` record so the entry stops following the live set, and continues with the rest of the batch. Per-image rename failures (collision, permission, IO) are logged to `errors.jsonl` and the run prints a final `renamed N, skipped M meaningful-looking name(s), failed K` summary instead of aborting on the first failure. API keys appearing in any error message (URL `?key=`, `Authorization: Bearer …`, raw `sk-…` / `AIza…` strings) are redacted before being written to `errors.jsonl` or stderr.
+
 ### Meaningful-filename gate
 
 `rename` skips files whose current name already looks human-meaningful and only renames stems that look auto-generated (`IMG_0034`, `PXL_20240316_080000123`, `Screenshot 2025-11-01 at 14.32.55`, `1696862563748`, `image (1)`, etc.). Classification runs in two tiers:

@@ -53,6 +53,8 @@ clawgallery rename --apply
 
 `caption` only announces metadata writes (`captioned <path>`). The arrow notation (`->`) appears exclusively in `rename` output, where it represents an actual path change. To audit the cached gate verdict, read `filename_meaningful` from `captions.jsonl`.
 
+`rename --apply` self-heals when a tracked path is missing on disk: it prints `would skip (missing source) <path>`, appends an `active=false` record so future runs stop attempting that path, and continues. Per-image failures are logged to `errors.jsonl` (with API keys redacted) and reported in the final `renamed/skipped/failed` summary; one bad image no longer aborts the batch.
+
 Poll once for newly added images:
 
 ```bash

@@ -538,3 +538,131 @@ fn caption_dry_run_skips_pruned_records() {
         "pruned image must not be a caption target, got: {output}"
     );
 }
+
+#[test]
+fn rename_apply_self_heals_when_source_already_missing() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).unwrap();
+    let img = images.join("IMG_0042.png");
+    fs::write(&img, b"x").unwrap();
+    assert_success(run(&config, &["init"]));
+    assert_success(run(&config, &["folder", "add", images.to_str().unwrap()]));
+    assert_success(run(&config, &["bootstrap"]));
+    let canonical = img.canonicalize().unwrap();
+    let id = first_image_id(&config);
+    inject_caption(&config, &canonical, &id, "Synthetic Title", Some(false));
+    fs::remove_file(&canonical).unwrap();
+
+    let output = run(&config, &["rename", "--apply", "--style", "title"]);
+    assert!(
+        output.status.success(),
+        "rename --apply must self-heal when source is missing\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    assert!(
+        stdout.contains("missing source"),
+        "stdout should announce a missing-source skip, got: {stdout}"
+    );
+
+    let records = read_jsonl(&config.join("images.jsonl"));
+    let our_records: Vec<_> = records
+        .iter()
+        .filter(|r| r["id"].as_str().unwrap() == id)
+        .collect();
+    assert!(
+        our_records
+            .iter()
+            .any(|r| r["active"] == serde_json::json!(false) && r["removed_at"].is_string()),
+        "self-heal must append an active=false record for the vanished path, got: {our_records:#?}"
+    );
+}
+
+#[test]
+fn rename_apply_continues_after_per_image_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).unwrap();
+    let vanished = images.join("IMG_0001.png");
+    let alive = images.join("IMG_0002.png");
+    fs::write(&vanished, b"a").unwrap();
+    fs::write(&alive, b"b").unwrap();
+    assert_success(run(&config, &["init"]));
+    assert_success(run(&config, &["folder", "add", images.to_str().unwrap()]));
+    assert_success(run(&config, &["bootstrap"]));
+
+    let records = read_jsonl(&config.join("images.jsonl"));
+    let id_for = |name: &str| -> String {
+        records
+            .iter()
+            .find(|r| r["path"].as_str().unwrap().ends_with(name))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    inject_caption(
+        &config,
+        &vanished.canonicalize().unwrap(),
+        &id_for("IMG_0001.png"),
+        "ghost",
+        Some(false),
+    );
+    inject_caption(
+        &config,
+        &alive.canonicalize().unwrap(),
+        &id_for("IMG_0002.png"),
+        "fresh-target",
+        Some(false),
+    );
+    fs::remove_file(&vanished).unwrap();
+
+    let output = run(&config, &["rename", "--apply", "--style", "title"]);
+    assert!(
+        output.status.success(),
+        "batch must keep going past the missing-source image\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    assert!(
+        stdout.contains("missing source"),
+        "missing source must be reported per-image, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("renamed ") && stdout.contains("fresh-target.png"),
+        "second image must still be renamed, got: {stdout}"
+    );
+}
+
+#[test]
+fn rename_dry_run_self_heals_when_source_missing() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).unwrap();
+    let img = images.join("IMG_9999.png");
+    fs::write(&img, b"x").unwrap();
+    assert_success(run(&config, &["init"]));
+    assert_success(run(&config, &["folder", "add", images.to_str().unwrap()]));
+    assert_success(run(&config, &["bootstrap"]));
+    let canonical = img.canonicalize().unwrap();
+    let id = first_image_id(&config);
+    inject_caption(&config, &canonical, &id, "Title", Some(false));
+    fs::remove_file(&canonical).unwrap();
+
+    let stdout = assert_success(run(&config, &["rename", "--dry-run", "--style", "title"]));
+    assert!(
+        stdout.contains("missing source"),
+        "dry-run must also report missing source skip, got: {stdout}"
+    );
+    let records = read_jsonl(&config.join("images.jsonl"));
+    assert!(
+        !records
+            .iter()
+            .any(|r| r.get("active") == Some(&serde_json::json!(false))),
+        "dry-run must NEVER append active=false records, got: {records:#?}"
+    );
+}

@@ -620,6 +620,7 @@ fn cmd_rename(paths: &AppPaths, args: RenameArgs) -> Result<()> {
     }
     let mut renamed = 0_usize;
     let mut skipped = 0_usize;
+    let mut failed = 0_usize;
     for image in images {
         let Some(caption) = captions.get(&image.path) else {
             continue;
@@ -634,6 +635,13 @@ fn cmd_rename(paths: &AppPaths, args: RenameArgs) -> Result<()> {
             }
             continue;
         }
+        if !image.path.exists() {
+            println!("would skip (missing source) {}", image.path.display());
+            if args.apply {
+                deactivate_image_record(paths, &image)?;
+            }
+            continue;
+        }
         let title = match args.style {
             RenameStyle::Title => caption.title.clone(),
             RenameStyle::Caption => caption.description.clone(),
@@ -643,7 +651,14 @@ fn cmd_rename(paths: &AppPaths, args: RenameArgs) -> Result<()> {
                 caption.title
             ),
         };
-        let target = rename_candidate(&image.path, &title, config.filename_limit_bytes)?;
+        let target = match rename_candidate(&image.path, &title, config.filename_limit_bytes) {
+            Ok(t) => t,
+            Err(err) => {
+                log_error(paths, "rename", err);
+                failed += 1;
+                continue;
+            }
+        };
         let record = RenameRecord {
             image_id: Some(image.id.clone()),
             from: image.path.clone(),
@@ -654,32 +669,63 @@ fn cmd_rename(paths: &AppPaths, args: RenameArgs) -> Result<()> {
         };
         if args.apply {
             if target.exists() {
-                bail!("refusing to overwrite existing file {}", target.display());
+                log_error(
+                    paths,
+                    "rename",
+                    anyhow!("refusing to overwrite existing file {}", target.display()),
+                );
+                failed += 1;
+                continue;
             }
-            fs::rename(&image.path, &target).with_context(|| {
+            if let Err(err) = fs::rename(&image.path, &target).with_context(|| {
                 format!(
                     "failed to rename {} to {}",
                     image.path.display(),
                     target.display()
                 )
-            })?;
-            append_jsonl(&paths.renames, &record)?;
+            }) {
+                log_error(paths, "rename", err);
+                failed += 1;
+                continue;
+            }
+            if let Err(err) = append_jsonl(&paths.renames, &record) {
+                log_error(paths, "rename", err);
+                failed += 1;
+                continue;
+            }
             let mut updated = image.clone();
             updated.path = fs::canonicalize(&target).unwrap_or(target.clone());
-            append_jsonl(&paths.images, &updated)?;
+            if let Err(err) = append_jsonl(&paths.images, &updated) {
+                log_error(paths, "rename", err);
+                failed += 1;
+                continue;
+            }
             println!("renamed {} -> {}", image.path.display(), target.display());
         } else {
-            append_jsonl(&paths.renames, &record)?;
+            if let Err(err) = append_jsonl(&paths.renames, &record) {
+                log_error(paths, "rename", err);
+                failed += 1;
+                continue;
+            }
             println!("dry-run {} -> {}", image.path.display(), target.display());
         }
         renamed += 1;
     }
     if args.apply {
-        println!("renamed {renamed}, skipped {skipped} meaningful-looking name(s)");
+        println!(
+            "renamed {renamed}, skipped {skipped} meaningful-looking name(s), failed {failed}"
+        );
     } else if skipped > 0 {
         println!("(would skip {skipped} meaningful-looking name(s); use --force to override)");
     }
     Ok(())
+}
+
+fn deactivate_image_record(paths: &AppPaths, image: &ImageRecord) -> Result<()> {
+    let mut deactivated = image.clone();
+    deactivated.active = false;
+    deactivated.removed_at = Some(Utc::now());
+    append_jsonl(&paths.images, &deactivated)
 }
 
 fn cmd_search(paths: &AppPaths, args: SearchArgs) -> Result<()> {
@@ -1376,13 +1422,27 @@ fn truncate_utf8_bytes(input: &str, max_bytes: usize) -> String {
 }
 
 fn log_error(paths: &AppPaths, context: &str, err: anyhow::Error) {
+    let message = mask_api_keys(&err.to_string());
     let record = ErrorRecord {
         context: context.to_string(),
-        message: err.to_string(),
+        message: message.clone(),
         created_at: Utc::now(),
     };
     let _ = append_jsonl(&paths.errors, &record);
-    eprintln!("{context}: {err}");
+    eprintln!("{context}: {message}");
+}
+
+fn mask_api_keys(input: &str) -> String {
+    let key_query = regex::Regex::new(r"(?i)([?&]key=)[^\s&)]+").expect("key= regex compiles");
+    let bearer =
+        regex::Regex::new(r"(?i)(Bearer\s+)[A-Za-z0-9_\-\.]+").expect("bearer regex compiles");
+    let openai = regex::Regex::new(r"sk-[A-Za-z0-9_\-]{16,}").expect("openai regex compiles");
+    let gemini = regex::Regex::new(r"AIza[0-9A-Za-z_\-]{35}").expect("gemini regex compiles");
+    let step1 = key_query.replace_all(input, "${1}REDACTED");
+    let step2 = bearer.replace_all(&step1, "${1}REDACTED");
+    let step3 = openai.replace_all(&step2, "REDACTED");
+    let step4 = gemini.replace_all(&step3, "REDACTED");
+    step4.into_owned()
 }
 
 #[cfg(test)]
@@ -1678,6 +1738,42 @@ mod tests {
             RenameDecision::Skip,
             "ambiguous names without a cached model answer must be skipped conservatively"
         );
+    }
+
+    #[test]
+    fn mask_api_keys_redacts_query_string_keys() {
+        let s = "404 for url (https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=AIzaSyAoIIGoqlaB0OMD5I958MYdJ1TCcd5JgYA)";
+        let masked = mask_api_keys(s);
+        assert!(!masked.contains("AIzaSyAoIIGoqlaB0OMD5I958MYdJ1TCcd5JgYA"));
+        assert!(masked.contains("key=REDACTED"));
+    }
+
+    #[test]
+    fn mask_api_keys_redacts_bearer_tokens() {
+        let s = "Authorization: Bearer sk-proj-uLjyl6YxDb_vbQbHi0vPR3hyfJGwSVeoYIEwddMkMPCF7OjUi8iN8UafXklvRARqGYow2DiuFST3BlbkFJiDpamU";
+        let masked = mask_api_keys(s);
+        assert!(!masked.contains("sk-proj-uLjyl6YxDb"));
+        assert!(masked.contains("REDACTED"));
+    }
+
+    #[test]
+    fn mask_api_keys_redacts_loose_openai_keys() {
+        let s = "leak: sk-proj-uLjyl6YxDb_vbQbHi0vPR3hyfJGwSVeoYIEwddMkMPCF7OjUi8iN8UafXklvRARqGYow2DiuFST3BlbkFJiDpamU somewhere in middle";
+        let masked = mask_api_keys(s);
+        assert!(!masked.contains("sk-proj-uLjyl6YxDb"));
+    }
+
+    #[test]
+    fn mask_api_keys_redacts_loose_gemini_keys() {
+        let s = "leak: AIzaSyAoIIGoqlaB0OMD5I958MYdJ1TCcd5JgYA inline";
+        let masked = mask_api_keys(s);
+        assert!(!masked.contains("AIzaSyAoIIGoqlaB0OMD5I958MYdJ1TCcd5JgYA"));
+    }
+
+    #[test]
+    fn mask_api_keys_is_idempotent_on_clean_text() {
+        let s = "no secrets here, just plain text";
+        assert_eq!(mask_api_keys(s), s);
     }
 
     #[test]
