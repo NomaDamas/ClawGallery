@@ -106,15 +106,4 @@ Rename is dry-run by default. `--apply` is required to modify files. ClawGallery
 
 Pass `--force` to rename every captioned image regardless of name, or `--file <path>` to rename a single explicit target without consulting the gate.
 
-`caption` reports its decision per image so you can audit the gate without reading JSONL:
-
-```text
-captioned /path/to/IMG_0270.jpg
-  title: small-residential-pool-with-palm-trees
-  filename_meaningful: false (regex)
-captioned /path/to/김동규 프로필사진.jpeg
-  title: man-in-tigers-baseball-jersey-holding-bat-in-cafe
-  filename_meaningful: true (model)
-```
-
-Source tags are `regex` (decided by the local family list, no model call), `model` (decided by the text-only stem classifier), or `unknown` (model call failed, gate falls back to skip). `caption --dry-run` previews the same field as `? (model)` for stems that would need a model call.
+`caption` only announces metadata writes (`captioned <path>`); the gate decision lives in `rename`'s output (`dry-run X -> Y`, `would skip ...`, `renamed X -> Y`). To audit the cached gate verdict for a specific image, read `filename_meaningful` from `captions.jsonl`.

@@ -122,7 +122,7 @@ fn skill_path_materializes_embedded_skill() {
 }
 
 #[test]
-fn caption_dry_run_predicts_filename_meaningful_from_regex() {
+fn caption_dry_run_output_is_terse() {
     let temp = tempfile::tempdir().unwrap();
     let config = temp.path().join("state");
     let images = temp.path().join("images");
@@ -141,18 +141,18 @@ fn caption_dry_run_predicts_filename_meaningful_from_regex() {
         stdout.contains("would caption "),
         "dry-run still announces planned captions, got: {stdout}"
     );
-    assert!(
-        stdout.contains("filename_meaningful: false (regex)"),
-        "regex-generic stem must surface its source, got: {stdout}"
-    );
-    assert!(
-        stdout.contains("filename_meaningful: ? (model)"),
-        "ambiguous stem must show that the model decides at caption time, got: {stdout}"
-    );
-    assert!(
-        !stdout.contains(" -> "),
-        "old arrow output must be gone in dry-run, got: {stdout}"
-    );
+    for forbidden in [
+        "title:",
+        "filename_meaningful:",
+        "(regex)",
+        "(model)",
+        " -> ",
+    ] {
+        assert!(
+            !stdout.contains(forbidden),
+            "caption stdout must stay terse and not leak {forbidden:?}, got: {stdout}"
+        );
+    }
 }
 
 #[test]
