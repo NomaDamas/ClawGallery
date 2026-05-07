@@ -222,6 +222,325 @@ fn read_jsonl(path: &Path) -> Vec<serde_json::Value> {
         .collect()
 }
 
+fn setup_search_fixture(
+    entries: &[(&str, &str, &str, &str, bool)],
+) -> (tempfile::TempDir, PathBuf) {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).unwrap();
+    assert_success(run(&config, &["init"]));
+
+    let mut image_lines = String::new();
+    let mut caption_lines = String::new();
+    for (idx, (name, title, description, discovered_at, active)) in entries.iter().enumerate() {
+        let path = images.join(name);
+        fs::write(&path, b"not really png").unwrap();
+        let canonical = path.canonicalize().unwrap();
+        let id = format!("image-{idx}");
+        let image = serde_json::json!({
+            "id": id,
+            "path": canonical,
+            "original_path": canonical,
+            "sha256": format!("sha{idx}"),
+            "size": 1,
+            "modified_at": null,
+            "discovered_at": discovered_at,
+            "extension": "png",
+            "active": active,
+            "removed_at": null,
+        });
+        image_lines.push_str(&format!("{image}\n"));
+        let caption = serde_json::json!({
+            "image_id": id,
+            "path": canonical,
+            "title": title,
+            "description": description,
+            "model": "test",
+            "provider": "test",
+            "created_at": "2026-05-04T00:00:00Z",
+            "filename_meaningful": false
+        });
+        caption_lines.push_str(&format!("{caption}\n"));
+    }
+    fs::write(config.join("images.jsonl"), image_lines).unwrap();
+    fs::write(config.join("captions.jsonl"), caption_lines).unwrap();
+    (temp, config)
+}
+
+fn result_paths(stdout: &str) -> Vec<&str> {
+    stdout
+        .lines()
+        .filter(|line| line.ends_with(".png"))
+        .collect()
+}
+
+#[test]
+fn search_ranks_title_above_description() {
+    let (_temp, config) = setup_search_fixture(&[
+        (
+            "desc.png",
+            "Settings Panel",
+            "Login workflow appears in a browser",
+            "2026-05-04T00:00:00Z",
+            true,
+        ),
+        (
+            "title.png",
+            "Login Dialog",
+            "A generic modal",
+            "2026-05-03T00:00:00Z",
+            true,
+        ),
+    ]);
+    let stdout = assert_success(run(&config, &["search", "login"]));
+    let paths = result_paths(&stdout);
+    assert!(paths[0].ends_with("title.png"), "got: {stdout}");
+}
+
+#[test]
+fn search_smart_case_lowercase_query() {
+    let (_temp, config) = setup_search_fixture(&[(
+        "mixed.png",
+        "Login Dialog",
+        "Mixed case title",
+        "2026-05-04T00:00:00Z",
+        true,
+    )]);
+    let stdout = assert_success(run(&config, &["search", "login"]));
+    assert!(stdout.contains("mixed.png"));
+}
+
+#[test]
+fn search_smart_case_uppercase_query_is_case_sensitive() {
+    let (_temp, config) = setup_search_fixture(&[(
+        "lower.png",
+        "login dialog",
+        "lowercase title",
+        "2026-05-04T00:00:00Z",
+        true,
+    )]);
+    let stdout = assert_success(run(&config, &["search", "Login"]));
+    assert!(stdout.trim().is_empty(), "got: {stdout}");
+}
+
+#[test]
+fn search_fzf_dsl_negation() {
+    let (_temp, config) = setup_search_fixture(&[
+        (
+            "good.png",
+            "Login dialog",
+            "production UI",
+            "2026-05-04T00:00:00Z",
+            true,
+        ),
+        (
+            "bad.png",
+            "Login dialog",
+            "test fixture UI",
+            "2026-05-05T00:00:00Z",
+            true,
+        ),
+    ]);
+    let stdout = assert_success(run(&config, &["search", "login", "!test"]));
+    assert!(stdout.contains("good.png"));
+    assert!(!stdout.contains("bad.png"));
+}
+
+#[test]
+fn search_fzf_dsl_exact() {
+    let (_temp, config) = setup_search_fixture(&[
+        ("foo.png", "foo", "exact", "2026-05-04T00:00:00Z", true),
+        ("fo.png", "fo", "short", "2026-05-05T00:00:00Z", true),
+    ]);
+    let stdout = assert_success(run(&config, &["search", "'foo"]));
+    assert!(stdout.contains("foo.png"));
+    assert!(!stdout.contains("fo.png"));
+}
+
+#[test]
+fn search_fzf_dsl_prefix() {
+    let (_temp, config) = setup_search_fixture(&[
+        (
+            "login.png",
+            "login panel",
+            "prefix",
+            "2026-05-04T00:00:00Z",
+            true,
+        ),
+        (
+            "other.png",
+            "panel login",
+            "not prefix",
+            "2026-05-05T00:00:00Z",
+            true,
+        ),
+    ]);
+    let stdout = assert_success(run(&config, &["search", "^login"]));
+    assert!(stdout.contains("login.png"));
+    assert!(!stdout.contains("other.png"));
+}
+
+#[test]
+fn search_levenshtein_fallback_typo() {
+    let (_temp, config) = setup_search_fixture(&[(
+        "screen.png",
+        "Screenshot capture",
+        "desktop image",
+        "2026-05-04T00:00:00Z",
+        true,
+    )]);
+    let stdout = assert_success(run(&config, &["search", "scrnshot"]));
+    assert!(stdout.contains("falling back"), "got: {stdout}");
+    assert!(stdout.contains("screen.png"));
+}
+
+#[test]
+fn search_levenshtein_skipped_for_short_atom() {
+    let (_temp, config) = setup_search_fixture(&[(
+        "ux.png",
+        "UX panel",
+        "interface settings",
+        "2026-05-04T00:00:00Z",
+        true,
+    )]);
+    let stdout = assert_success(run(&config, &["search", "ui"]));
+    assert!(stdout.trim().is_empty(), "got: {stdout}");
+}
+
+#[test]
+fn search_no_fuzzy_disables_dsl_and_fallback() {
+    let (_temp, config) = setup_search_fixture(&[(
+        "bang.png",
+        "literal !foo marker",
+        "not a negation",
+        "2026-05-04T00:00:00Z",
+        true,
+    )]);
+    let stdout = assert_success(run(&config, &["search", "!foo", "--no-fuzzy"]));
+    assert!(stdout.contains("bang.png"));
+    assert!(!stdout.contains("score:"), "old output only: {stdout}");
+}
+
+#[test]
+fn search_json_output_jsonl_one_per_line() {
+    let (_temp, config) = setup_search_fixture(&[(
+        "json.png",
+        "Login JSON",
+        "structured output",
+        "2026-05-04T00:00:00Z",
+        true,
+    )]);
+    let stdout = assert_success(run(&config, &["search", "login", "--json"]));
+    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+        let value: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(value["source"], "fuzzy");
+        assert!(value["score"].is_number());
+    }
+}
+
+#[test]
+fn search_case_sensitive_flag() {
+    let (_temp, config) = setup_search_fixture(&[(
+        "case.png",
+        "foo panel",
+        "lowercase only",
+        "2026-05-04T00:00:00Z",
+        true,
+    )]);
+    let stdout = assert_success(run(&config, &["search", "Foo", "--case-sensitive"]));
+    assert!(stdout.trim().is_empty(), "got: {stdout}");
+}
+
+#[test]
+fn search_korean_nfc_normalization() {
+    let nfd = "한글";
+    let (_temp, config) = setup_search_fixture(&[(
+        "korean.png",
+        nfd,
+        "decomposed Hangul caption",
+        "2026-05-04T00:00:00Z",
+        true,
+    )]);
+    let stdout = assert_success(run(&config, &["search", "한글"]));
+    assert!(stdout.contains("korean.png"), "got: {stdout}");
+}
+
+#[test]
+fn search_active_false_excluded() {
+    let (_temp, config) = setup_search_fixture(&[
+        (
+            "active.png",
+            "Login active",
+            "kept",
+            "2026-05-04T00:00:00Z",
+            true,
+        ),
+        (
+            "inactive.png",
+            "Login inactive",
+            "pruned",
+            "2026-05-05T00:00:00Z",
+            false,
+        ),
+    ]);
+    let stdout = assert_success(run(&config, &["search", "login"]));
+    assert!(stdout.contains("active.png"));
+    assert!(!stdout.contains("inactive.png"));
+}
+
+#[test]
+fn search_no_results_clean_exit() {
+    let (_temp, config) =
+        setup_search_fixture(&[("one.png", "Settings", "panel", "2026-05-04T00:00:00Z", true)]);
+    let stdout = assert_success(run(&config, &["search", "nomatch"]));
+    assert!(stdout.trim().is_empty(), "got: {stdout}");
+}
+
+#[test]
+fn search_limit_truncates_after_sort() {
+    let (_temp, config) = setup_search_fixture(&[
+        (
+            "path-login.png",
+            "Other",
+            "misc",
+            "2026-05-05T00:00:00Z",
+            true,
+        ),
+        (
+            "desc.png",
+            "Other",
+            "login description",
+            "2026-05-04T00:00:00Z",
+            true,
+        ),
+        (
+            "title-a.png",
+            "Login Alpha",
+            "best",
+            "2026-05-03T00:00:00Z",
+            true,
+        ),
+        (
+            "title-b.png",
+            "Login Beta",
+            "best",
+            "2026-05-06T00:00:00Z",
+            true,
+        ),
+        ("other.png", "Login", "best", "2026-05-02T00:00:00Z", true),
+    ]);
+    let stdout = assert_success(run(&config, &["search", "login", "--limit", "2"]));
+    let paths = result_paths(&stdout);
+    assert_eq!(paths.len(), 2, "got: {stdout}");
+    assert!(
+        paths
+            .iter()
+            .all(|path| path.contains("title") || path.contains("other")),
+        "got: {stdout}"
+    );
+}
+
 #[test]
 fn bootstrap_prune_marks_missing_files_inactive() {
     let temp = tempfile::tempdir().unwrap();
