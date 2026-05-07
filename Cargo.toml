@@ -4,7 +4,7 @@ version = "0.1.0"
 authors = ["Jeffrey (Dongkyu) Kim <vkehfdl1@gmail.com>"]
 edition = "2024"
 description = "Agent-native screenshot gallery CLI with JSONL metadata, visual captions, and safe rename workflows."
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 
 [dependencies]
 anyhow = "1.0"
