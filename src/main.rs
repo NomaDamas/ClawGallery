@@ -2,6 +2,10 @@ use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use chrono::{DateTime, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use nucleo_matcher::{
+    Config, Matcher, Utf32Str,
+    pattern::{CaseMatching, Normalization, Pattern},
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -15,6 +19,7 @@ use std::{
     thread,
     time::Duration,
 };
+use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
@@ -156,9 +161,20 @@ enum RenameStyle {
 
 #[derive(Debug, Args)]
 struct SearchArgs {
+    /// Query terms (combined as fzf-style query). See README for syntax.
     keywords: Vec<String>,
+    /// Maximum number of results to print.
     #[arg(long, default_value_t = 20)]
     limit: usize,
+    /// Emit one JSON object per result (JSONL).
+    #[arg(long)]
+    json: bool,
+    /// Force case-sensitive matching (overrides smart-case).
+    #[arg(long)]
+    case_sensitive: bool,
+    /// Disable fuzzy matching and Levenshtein fallback. Old-style substring AND.
+    #[arg(long)]
+    no_fuzzy: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -728,34 +744,480 @@ fn deactivate_image_record(paths: &AppPaths, image: &ImageRecord) -> Result<()> 
     append_jsonl(&paths.images, &deactivated)
 }
 
+#[derive(Debug, Clone)]
+struct SearchCandidate {
+    path_raw: PathBuf,
+    path_nfc: String,
+    title_nfc: String,
+    description_nfc: String,
+    discovered_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+struct SearchHit {
+    candidate_idx: usize,
+    score: f64,
+    pattern_score: u32,
+    matched_field: MatchedField,
+    matched_atoms: Vec<String>,
+    source: HitSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum HitSource {
+    Fuzzy,
+    Levenshtein,
+    NoFuzzy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum MatchedField {
+    Title,
+    Description,
+    Path,
+    Multiple,
+}
+
+impl MatchedField {
+    fn as_str(self) -> &'static str {
+        match self {
+            MatchedField::Title => "title",
+            MatchedField::Description => "description",
+            MatchedField::Path => "path",
+            MatchedField::Multiple => "multiple",
+        }
+    }
+}
+
+fn nfc(s: &str) -> String {
+    s.nfc().collect()
+}
+
+fn case_fold_for_search(s: &str, case_sensitive: bool) -> String {
+    if case_sensitive {
+        s.to_string()
+    } else {
+        s.to_lowercase()
+    }
+}
+
+fn smart_case_sensitive(query: &str, case_sensitive: bool) -> bool {
+    case_sensitive || query.chars().any(|ch| ch.is_uppercase())
+}
+
+fn extract_atom_payloads(query: &str) -> Vec<String> {
+    query
+        .split_whitespace()
+        .filter_map(|raw| {
+            let mut atom = raw;
+            if atom.starts_with('!') {
+                return None;
+            }
+            if let Some(stripped) = atom.strip_prefix(r"\!") {
+                atom = stripped;
+            }
+            if let Some(stripped) = atom.strip_prefix('^') {
+                atom = stripped;
+            }
+            if let Some(stripped) = atom.strip_prefix('"') {
+                atom = stripped;
+            }
+            if let Some(stripped) = atom.strip_prefix('\'') {
+                atom = stripped;
+            }
+            if let Some(stripped) = atom.strip_suffix('$') {
+                atom = stripped;
+            }
+            let payload = atom
+                .replace(r"\ ", " ")
+                .replace(r"\^", "^")
+                .replace(r"\'", "'")
+                .replace(r"\$", "$")
+                .replace(r"\!", "!");
+            (!payload.trim().is_empty()).then(|| payload.trim().to_string())
+        })
+        .collect()
+}
+
+fn build_candidates(
+    images: Vec<ImageRecord>,
+    captions: &HashMap<PathBuf, CaptionRecord>,
+) -> Vec<SearchCandidate> {
+    images
+        .into_iter()
+        .map(|image| {
+            let cap = captions.get(&image.path);
+            SearchCandidate {
+                path_nfc: nfc(&image.path.display().to_string()),
+                title_nfc: nfc(cap.map(|c| c.title.as_str()).unwrap_or("<missing>")),
+                description_nfc: nfc(cap.map(|c| c.description.as_str()).unwrap_or("<missing>")),
+                discovered_at: image.discovered_at,
+                path_raw: image.path,
+            }
+        })
+        .collect()
+}
+
+fn score_field(
+    pattern: &Pattern,
+    haystack: &str,
+    weight: f64,
+    matcher: &mut Matcher,
+    buf: &mut Vec<char>,
+) -> Option<(u32, f64)> {
+    pattern
+        .score(Utf32Str::new(haystack, buf), matcher)
+        .map(|score| (score, f64::from(score) * weight))
+}
+
+fn best_matched_field(scores: &[(MatchedField, u32, f64)]) -> MatchedField {
+    if scores.len() > 1 {
+        let best = scores
+            .iter()
+            .map(|(_, _, weighted)| *weighted)
+            .fold(0.0, f64::max);
+        let tied = scores
+            .iter()
+            .filter(|(_, _, weighted)| (*weighted - best).abs() < f64::EPSILON)
+            .count();
+        if tied > 1 {
+            return MatchedField::Multiple;
+        }
+    }
+    scores
+        .iter()
+        .max_by(|a, b| a.2.total_cmp(&b.2))
+        .map(|(field, _, _)| *field)
+        .unwrap_or(MatchedField::Multiple)
+}
+
+fn search_pattern_pass(
+    candidates: &[SearchCandidate],
+    query: &str,
+    matcher: &mut Matcher,
+    case_sensitive: bool,
+) -> Vec<SearchHit> {
+    let case = if case_sensitive {
+        CaseMatching::Respect
+    } else {
+        CaseMatching::Smart
+    };
+    let pattern = Pattern::parse(query, case, Normalization::Smart);
+    let atoms = extract_atom_payloads(query);
+    let smart_sensitive = smart_case_sensitive(query, case_sensitive);
+    let atoms_cmp: Vec<String> = atoms
+        .iter()
+        .map(|atom| case_fold_for_search(atom, smart_sensitive))
+        .collect();
+    let mut buf = Vec::new();
+    let mut hits = Vec::new();
+
+    for (candidate_idx, candidate) in candidates.iter().enumerate() {
+        let mut scores = Vec::new();
+        if let Some((raw, weighted)) =
+            score_field(&pattern, &candidate.title_nfc, 3.0, matcher, &mut buf)
+        {
+            scores.push((MatchedField::Title, raw, weighted));
+        }
+        if let Some((raw, weighted)) =
+            score_field(&pattern, &candidate.description_nfc, 1.5, matcher, &mut buf)
+        {
+            scores.push((MatchedField::Description, raw, weighted));
+        }
+        if let Some((raw, weighted)) =
+            score_field(&pattern, &candidate.path_nfc, 1.0, matcher, &mut buf)
+        {
+            scores.push((MatchedField::Path, raw, weighted));
+        }
+        if scores.is_empty() {
+            continue;
+        }
+
+        let combined_cmp = case_fold_for_search(
+            &format!(
+                "{} {} {}",
+                candidate.title_nfc, candidate.description_nfc, candidate.path_nfc
+            ),
+            smart_sensitive,
+        );
+        if query.split_whitespace().any(|atom| {
+            atom.strip_prefix('!')
+                .filter(|payload| !payload.is_empty())
+                .map(|payload| {
+                    combined_cmp.contains(&case_fold_for_search(payload, smart_sensitive))
+                })
+                .unwrap_or(false)
+        }) {
+            continue;
+        }
+
+        let matched_field = best_matched_field(&scores);
+        let (pattern_score, weighted_score) = scores
+            .iter()
+            .max_by(|a, b| a.2.total_cmp(&b.2))
+            .map(|(_, raw, weighted)| (*raw, *weighted))
+            .unwrap_or((0, 0.0));
+        let title_cmp = case_fold_for_search(&candidate.title_nfc, smart_sensitive);
+        let desc_cmp = case_fold_for_search(&candidate.description_nfc, smart_sensitive);
+        let path_cmp = case_fold_for_search(&candidate.path_nfc, smart_sensitive);
+        let stem_cmp = candidate
+            .path_raw
+            .file_stem()
+            .and_then(OsStr::to_str)
+            .map(nfc)
+            .map(|stem| case_fold_for_search(&stem, smart_sensitive))
+            .unwrap_or_default();
+        let matched_atoms: Vec<String> = atoms
+            .iter()
+            .zip(atoms_cmp.iter())
+            .filter(|(_, atom)| {
+                title_cmp.contains(atom.as_str())
+                    || desc_cmp.contains(atom.as_str())
+                    || path_cmp.contains(atom.as_str())
+            })
+            .map(|(atom, _)| atom.clone())
+            .collect();
+        if !atoms.is_empty() && matched_atoms.is_empty() {
+            continue;
+        }
+        let mut bonus = 0.0;
+        if atoms_cmp
+            .iter()
+            .any(|atom| title_cmp.contains(atom.as_str()))
+        {
+            bonus += 50.0;
+        }
+        if atoms_cmp
+            .first()
+            .is_some_and(|atom| title_cmp.starts_with(atom.as_str()))
+        {
+            bonus += 30.0;
+        }
+        if atoms_cmp
+            .iter()
+            .any(|atom| stem_cmp.contains(atom.as_str()))
+        {
+            bonus += 10.0;
+        }
+
+        hits.push(SearchHit {
+            candidate_idx,
+            score: weighted_score + bonus,
+            pattern_score,
+            matched_field,
+            matched_atoms,
+            source: HitSource::Fuzzy,
+        });
+    }
+
+    hits
+}
+
+fn fallback_threshold(payload: &str) -> Option<f64> {
+    match payload.chars().count() {
+        0..=2 => None,
+        3..=8 => Some(0.75),
+        _ => Some(0.70),
+    }
+}
+
+fn best_window_similarity(atom: &str, text: &str, case_sensitive: bool) -> f64 {
+    let atom_cmp = case_fold_for_search(atom, case_sensitive);
+    let atom_token_count = atom_cmp.split_whitespace().count().max(1);
+    let text_cmp = case_fold_for_search(text, case_sensitive);
+    let tokens: Vec<&str> = text_cmp.split_whitespace().collect();
+    if tokens.is_empty() {
+        return 0.0;
+    }
+    let mut best = 0.0;
+    for size in [
+        atom_token_count.saturating_sub(1),
+        atom_token_count,
+        atom_token_count + 1,
+    ]
+    .into_iter()
+    .filter(|size| *size > 0)
+    {
+        if size > tokens.len() {
+            continue;
+        }
+        for window in tokens.windows(size) {
+            let joined = window.join(" ");
+            let similarity = strsim::normalized_damerau_levenshtein(&atom_cmp, &joined);
+            if similarity > best {
+                best = similarity;
+            }
+        }
+    }
+    best
+}
+
+fn search_levenshtein_fallback(
+    candidates: &[SearchCandidate],
+    query_atoms: &[String],
+    case_sensitive: bool,
+) -> Vec<SearchHit> {
+    let fallback_atoms: Vec<&String> = query_atoms
+        .iter()
+        .filter(|atom| fallback_threshold(atom).is_some())
+        .collect();
+    if fallback_atoms.is_empty() {
+        return Vec::new();
+    }
+
+    let mut hits = Vec::new();
+    for (candidate_idx, candidate) in candidates.iter().enumerate() {
+        let mut similarities = Vec::new();
+        let mut matched_atoms = Vec::new();
+        for atom in &fallback_atoms {
+            let threshold = fallback_threshold(atom).unwrap_or(1.0);
+            let title_similarity =
+                best_window_similarity(atom, &candidate.title_nfc, case_sensitive);
+            let desc_similarity =
+                best_window_similarity(atom, &candidate.description_nfc, case_sensitive);
+            let similarity = title_similarity.max(desc_similarity);
+            if similarity < threshold {
+                similarities.clear();
+                break;
+            }
+            similarities.push(similarity);
+            matched_atoms.push((*atom).clone());
+        }
+        if similarities.len() == fallback_atoms.len() {
+            let avg = similarities.iter().sum::<f64>() / similarities.len() as f64;
+            hits.push(SearchHit {
+                candidate_idx,
+                score: (avg * 1000.0).floor(),
+                pattern_score: 0,
+                matched_field: MatchedField::Multiple,
+                matched_atoms,
+                source: HitSource::Levenshtein,
+            });
+        }
+    }
+    hits
+}
+
+fn print_old_search_result(candidate: &SearchCandidate) {
+    println!(
+        "{}\n  title: {}\n  caption: {}",
+        candidate.path_raw.display(),
+        candidate.title_nfc,
+        candidate.description_nfc
+    );
+}
+
+fn print_text_result(hit: &SearchHit, candidate: &SearchCandidate) {
+    println!(
+        "{}\n  title: {}\n  caption: {}\n  score: {:.1}\n  matches: {} ({})",
+        candidate.path_raw.display(),
+        candidate.title_nfc,
+        candidate.description_nfc,
+        hit.score,
+        hit.matched_field.as_str(),
+        hit.matched_atoms.join(", ")
+    );
+}
+
+fn print_json_result(hit: &SearchHit, candidate: &SearchCandidate) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string(&json!({
+            "path": candidate.path_raw,
+            "title": candidate.title_nfc,
+            "description": candidate.description_nfc,
+            "score": hit.score,
+            "matched_field": hit.matched_field,
+            "matched_atoms": hit.matched_atoms,
+            "source": hit.source,
+        }))?
+    );
+    Ok(())
+}
+
 fn cmd_search(paths: &AppPaths, args: SearchArgs) -> Result<()> {
     if args.keywords.is_empty() {
         bail!("provide at least one keyword");
     }
-    let needle: Vec<String> = args.keywords.iter().map(|k| k.to_lowercase()).collect();
+    let query = nfc(&args.keywords.join(" "));
     let captions = latest_captions_by_path(paths)?;
     let images = latest_images(paths)?;
-    let mut printed = 0;
-    for image in images {
-        let cap = captions.get(&image.path);
-        let haystack = format!(
-            "{} {} {}",
-            image.path.display(),
-            cap.map(|c| c.title.as_str()).unwrap_or_default(),
-            cap.map(|c| c.description.as_str()).unwrap_or_default()
-        )
-        .to_lowercase();
-        if needle.iter().all(|keyword| haystack.contains(keyword)) {
-            println!(
-                "{}\n  title: {}\n  caption: {}",
-                image.path.display(),
-                cap.map(|c| c.title.as_str()).unwrap_or("<missing>"),
-                cap.map(|c| c.description.as_str()).unwrap_or("<missing>")
-            );
+    let candidates = build_candidates(images, &captions);
+
+    if args.no_fuzzy {
+        let needle: Vec<String> = args.keywords.iter().map(|k| k.to_lowercase()).collect();
+        let mut printed = 0;
+        for candidate in &candidates {
+            let haystack = format!(
+                "{} {} {}",
+                candidate.path_raw.display(),
+                candidate.title_nfc,
+                candidate.description_nfc
+            )
+            .to_lowercase();
+            if !needle.iter().all(|keyword| haystack.contains(keyword)) {
+                continue;
+            }
+            let hit = SearchHit {
+                candidate_idx: 0,
+                score: 0.0,
+                pattern_score: 0,
+                matched_field: MatchedField::Multiple,
+                matched_atoms: Vec::new(),
+                source: HitSource::NoFuzzy,
+            };
+            let _ = hit;
+            print_old_search_result(candidate);
             printed += 1;
             if printed >= args.limit {
                 break;
             }
+        }
+        return Ok(());
+    }
+
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let mut hits = search_pattern_pass(&candidates, &query, &mut matcher, args.case_sensitive);
+    let query_atoms = extract_atom_payloads(&query);
+    let mut used_fallback = false;
+    if hits.is_empty()
+        && !query_atoms.is_empty()
+        && !smart_case_sensitive(&query, args.case_sensitive)
+        && query_atoms
+            .iter()
+            .any(|atom| fallback_threshold(atom).is_some())
+    {
+        hits = search_levenshtein_fallback(&candidates, &query_atoms, args.case_sensitive);
+        used_fallback = !hits.is_empty();
+    }
+
+    hits.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| b.pattern_score.cmp(&a.pattern_score))
+            .then_with(|| {
+                candidates[b.candidate_idx]
+                    .discovered_at
+                    .cmp(&candidates[a.candidate_idx].discovered_at)
+            })
+            .then_with(|| {
+                candidates[a.candidate_idx]
+                    .path_raw
+                    .cmp(&candidates[b.candidate_idx].path_raw)
+            })
+    });
+
+    if used_fallback && !args.json {
+        println!("(no fuzzy matches; falling back to typo-tolerant search)");
+    }
+    for hit in hits.iter().take(args.limit) {
+        let candidate = &candidates[hit.candidate_idx];
+        if args.json {
+            print_json_result(hit, candidate)?;
+        } else {
+            print_text_result(hit, candidate);
         }
     }
     Ok(())

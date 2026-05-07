@@ -15,7 +15,7 @@ cargo install --path .
 clawgallery init
 clawgallery folder add ~/Desktop
 clawgallery bootstrap
-clawgallery search screenshot
+clawgallery search screenshot --json
 clawgallery caption --dry-run
 clawgallery rename --dry-run
 ```
@@ -88,10 +88,28 @@ clawgallery bootstrap [--folder <id>] [--path <path>] [--prune]
 clawgallery poll [--once] [--interval <seconds>] [--prune]
 clawgallery caption [--missing] [--file <path>] [--dry-run] [--model <model>] [--provider <provider>]
 clawgallery rename [--apply] [--dry-run] [--file <path>] [--style title|caption|date-title] [--force]
-clawgallery search <keywords...> [--limit <n>]
+clawgallery search <query...> [--limit <n>] [--json] [--case-sensitive] [--no-fuzzy]
 clawgallery status
 clawgallery skill path|print
 ```
+
+## Search syntax
+
+`clawgallery search` scans the local JSONL state on every invocation and ranks matches by weighted fields: title matches outrank description matches, which outrank path-only matches. The default text output includes the familiar path/title/caption lines plus `score:` and `matches:` lines. Agents and brittle scripts should prefer `--json` for JSONL records, or `--no-fuzzy` to preserve the old exact substring output format.
+
+Queries use nucleo/fzf-style operators:
+
+| Syntax | Meaning | Example |
+|---|---|---|
+| `foo bar` | AND-match both atoms fuzzily | `clawgallery search login error` |
+| `'foo` | Exact substring atom | `clawgallery search "'github"` |
+| `^foo` | Prefix atom | `clawgallery search ^Login` |
+| `foo$` | Suffix atom | `clawgallery search modal$` |
+| `!foo` | Exclude substring | `clawgallery search login !test` |
+| `!^foo`, `!foo$` | Exclude prefix/suffix | `clawgallery search !^Draft` |
+| `\ ` | Literal space inside an atom | `clawgallery search github\ actions` |
+
+Lowercase queries use smart-case matching; any uppercase atom becomes case-sensitive. Pass `--case-sensitive` to force case-sensitive matching. If the fuzzy pass returns no candidates, ClawGallery falls back to token/window typo tolerance for atoms of at least three characters. `--no-fuzzy` disables the DSL, fuzzy scoring, typo fallback, sorting, and score/matches output for compatibility with old scripts.
 
 ## Rename safety
 

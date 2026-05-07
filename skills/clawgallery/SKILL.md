@@ -29,7 +29,11 @@ Search known screenshots:
 ```bash
 clawgallery search login error
 clawgallery search "github actions" --limit 5
+clawgallery search "'github" "actions" --json
+clawgallery search "!error" "^login"
 ```
+
+Search supports fzf-style atoms: whitespace means AND, `'foo` means exact substring, `^foo` means prefix, `foo$` means suffix, `!foo` excludes a substring, and `\ ` escapes a literal space inside one atom. Default text output includes score/matches metadata; use `--no-fuzzy` for the old exact substring format.
 
 Caption uncaptured images:
 
@@ -83,7 +87,7 @@ The three steps are deliberately separated so cheap, free, idempotent indexing (
 
 ## Agent guidance
 
-1. Prefer `search` before asking the user to locate screenshots manually.
+1. Prefer `search --json` before asking the user to locate screenshots manually; JSONL is the stable output for agents.
 2. Use `caption --dry-run` to see pending work when model credentials may be absent.
 3. Never pass `--apply` to rename unless the user requested actual file changes or an approved workflow requires it.
 4. If a command needs isolated state, set `CLAWGALLERY_CONFIG_DIR` to a task-specific temporary directory.
