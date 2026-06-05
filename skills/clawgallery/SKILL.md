@@ -33,6 +33,14 @@ clawgallery search "'github" "actions" --json
 clawgallery search "!error" "^login"
 ```
 
+Search by local VDR embeddings:
+
+```bash
+python scripts/jina_omni_server.py --device auto
+clawgallery vdr sync
+clawgallery search --mode embedding "github actions" --json
+```
+
 Search supports fzf-style atoms: whitespace means AND, `'foo` means exact substring, `^foo` means prefix, `foo$` means suffix, `!foo` excludes a substring, and `\ ` escapes a literal space inside one atom. Default text output includes score/matches metadata; use `--no-fuzzy` for the old exact substring format.
 
 Caption uncaptured images:
@@ -69,6 +77,7 @@ Re-sync after files were deleted or moved outside ClawGallery:
 
 ```bash
 clawgallery bootstrap --prune
+clawgallery vdr sync --prune
 ```
 
 `--prune` appends `active=false` records to `images.jsonl` for any tracked path that is no longer on disk. The history is preserved (JSONL is append-only); downstream commands (`search`, `status`, `caption`, `rename`) automatically ignore inactive records.
@@ -82,6 +91,7 @@ ClawGallery state is split into three append-only JSONL event logs that join via
 | `images.jsonl` | `bootstrap`, `bootstrap --prune`, `rename --apply` | `ImageRecord` per discovery, prune, or rename |
 | `captions.jsonl` | `caption` | `CaptionRecord` per successful model call |
 | `renames.jsonl` | `rename` | `RenameRecord` per dry-run or apply attempt |
+| `vdr.sqlite3` | `vdr sync` | paired active image and caption embedding rows |
 
 The three steps are deliberately separated so cheap, free, idempotent indexing (`bootstrap`) is decoupled from paid network calls (`caption`) and from irreversible filesystem mutations (`rename --apply`).
 
@@ -89,5 +99,6 @@ The three steps are deliberately separated so cheap, free, idempotent indexing (
 
 1. Prefer `search --json` before asking the user to locate screenshots manually; JSONL is the stable output for agents.
 2. Use `caption --dry-run` to see pending work when model credentials may be absent.
-3. Never pass `--apply` to rename unless the user requested actual file changes or an approved workflow requires it.
-4. If a command needs isolated state, set `CLAWGALLERY_CONFIG_DIR` to a task-specific temporary directory.
+3. Use `search --mode embedding --json` after `vdr sync` when semantic image or caption similarity is more useful than keyword matching.
+4. Never pass `--apply` to rename unless the user requested actual file changes or an approved workflow requires it.
+5. If a command needs isolated state, set `CLAWGALLERY_CONFIG_DIR` to a task-specific temporary directory.

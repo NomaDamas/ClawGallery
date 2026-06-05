@@ -20,6 +20,15 @@ clawgallery caption --dry-run
 clawgallery rename --dry-run
 ```
 
+Semantic image search through local VDR:
+
+```bash
+uv pip install torch pillow sentence-transformers transformers einops timm
+python scripts/jina_omni_server.py --device auto
+clawgallery vdr sync
+clawgallery search --mode embedding "login error" --json
+```
+
 Continuous polling:
 
 ```bash
@@ -36,6 +45,7 @@ By default state is stored under `~/.config/clawgallery`:
 - `captions.jsonl`
 - `renames.jsonl`
 - `errors.jsonl`
+- `vdr.sqlite3`
 
 Set `CLAWGALLERY_CONFIG_DIR=/path/to/state` to override this location.
 
@@ -88,7 +98,9 @@ clawgallery bootstrap [--folder <id>] [--path <path>] [--prune]
 clawgallery poll [--once] [--interval <seconds>] [--prune]
 clawgallery caption [--missing] [--file <path>] [--dry-run] [--model <model>] [--provider <provider>]
 clawgallery rename [--apply] [--dry-run] [--file <path>] [--style title|caption|date-title] [--force]
-clawgallery search <query...> [--limit <n>] [--json] [--case-sensitive] [--no-fuzzy]
+clawgallery search [--mode keyword|embedding] <query...> [--limit <n>] [--json] [--case-sensitive] [--no-fuzzy] [--embedding-url <url>]
+clawgallery vdr sync [--prune] [--embedding-url <url>] [--model <model>] [--dimensions <n>]
+clawgallery vdr status [--json]
 clawgallery status
 clawgallery skill path|print
 ```
@@ -96,6 +108,8 @@ clawgallery skill path|print
 ## Search syntax
 
 `clawgallery search` scans the local JSONL state on every invocation and ranks matches by weighted fields: title matches outrank description matches, which outrank path-only matches. The default text output includes the familiar path/title/caption lines plus `score:` and `matches:` lines. Agents and brittle scripts should prefer `--json` for JSONL records, or `--no-fuzzy` to preserve the old exact substring output format.
+
+Pass `--mode embedding` to query the VDR index instead of the keyword matcher. Embedding search sends the query to the configured local embedding server, searches both image vectors and caption vectors, then returns the best matching vector per image. JSON output uses `source: "embedding"` and `matched_field: "embedding_image"` or `matched_field: "embedding_caption"`.
 
 Queries use nucleo/fzf-style operators:
 
@@ -110,6 +124,25 @@ Queries use nucleo/fzf-style operators:
 | `\ ` | Literal space inside an atom | `clawgallery search github\ actions` |
 
 Lowercase queries use smart-case matching; any uppercase atom becomes case-sensitive. Pass `--case-sensitive` to force case-sensitive matching. If the fuzzy pass returns no candidates, ClawGallery falls back to token/window typo tolerance for atoms of at least three characters. `--no-fuzzy` disables the DSL, fuzzy scoring, typo fallback, sorting, and score/matches output for compatibility with old scripts.
+
+## Visual Document Retrieval
+
+VDR stores paired image and caption embeddings for each active image in `vdr.sqlite3`. The store is embedded SQLite so it needs no daemon, works well on macOS, and stays inside the same config directory as the JSONL state. `clawgallery vdr sync` is incremental: unchanged image and caption content hashes are skipped, changed files or captions are re-embedded, and `--prune` deactivates vectors for images that are no longer active after `bootstrap --prune`.
+
+The local embedding server contract is:
+
+```text
+POST /embed
+{"model":"jinaai/jina-embeddings-v5-omni-small","dimensions":1024,"inputs":[{"kind":"image|text","role":"document|query","value":"path or text"}]}
+```
+
+The bundled macOS-oriented server script uses `jinaai/jina-embeddings-v5-omni-small` through `sentence-transformers`, enables Hugging Face remote model code, and chooses Apple MPS automatically when available:
+
+```bash
+python scripts/jina_omni_server.py --host 127.0.0.1 --port 8765 --device auto
+```
+
+Set `CLAWGALLERY_VDR_EMBEDDING_URL` or pass `--embedding-url` to point the CLI at a different compatible local server.
 
 ## Rename safety
 

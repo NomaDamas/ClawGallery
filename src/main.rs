@@ -23,6 +23,8 @@ use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
+mod vdr;
+
 const APP_DIR_NAME: &str = "clawgallery";
 const DEFAULT_MODEL: &str = "gpt-4.1-mini";
 const DEFAULT_FILENAME_LIMIT_BYTES: usize = 240;
@@ -58,6 +60,8 @@ enum Command {
     Rename(RenameArgs),
     /// Search local JSONL metadata by keyword.
     Search(SearchArgs),
+    /// Manage local visual document retrieval embeddings.
+    Vdr(vdr::VdrArgs),
     /// Show state and configuration summary.
     Status,
     /// Print or locate the bundled Vercel Agent Skill.
@@ -161,6 +165,9 @@ enum RenameStyle {
 
 #[derive(Debug, Args)]
 struct SearchArgs {
+    /// Search backend to use.
+    #[arg(long, value_enum, default_value_t = SearchMode::Keyword)]
+    mode: SearchMode,
     /// Query terms (combined as fzf-style query). See README for syntax.
     keywords: Vec<String>,
     /// Maximum number of results to print.
@@ -175,6 +182,15 @@ struct SearchArgs {
     /// Disable fuzzy matching and Levenshtein fallback. Old-style substring AND.
     #[arg(long)]
     no_fuzzy: bool,
+    /// Override the local VDR embedding server URL.
+    #[arg(long)]
+    embedding_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SearchMode {
+    Keyword,
+    Embedding,
 }
 
 #[derive(Debug, Subcommand)]
@@ -186,14 +202,15 @@ enum SkillCommand {
 }
 
 #[derive(Debug, Clone)]
-struct AppPaths {
-    root: PathBuf,
+pub(crate) struct AppPaths {
+    pub(crate) root: PathBuf,
     config: PathBuf,
     folders: PathBuf,
     images: PathBuf,
     captions: PathBuf,
     renames: PathBuf,
     errors: PathBuf,
+    pub(crate) vdr_db: PathBuf,
 }
 
 impl AppPaths {
@@ -212,11 +229,12 @@ impl AppPaths {
             captions: root.join("captions.jsonl"),
             renames: root.join("renames.jsonl"),
             errors: root.join("errors.jsonl"),
+            vdr_db: root.join("vdr.sqlite3"),
             root,
         })
     }
 
-    fn ensure(&self) -> Result<()> {
+    pub(crate) fn ensure(&self) -> Result<()> {
         fs::create_dir_all(&self.root)
             .with_context(|| format!("failed to create {}", self.root.display()))
     }
@@ -265,17 +283,17 @@ struct FolderRecord {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-struct ImageRecord {
-    id: String,
-    path: PathBuf,
+pub(crate) struct ImageRecord {
+    pub(crate) id: String,
+    pub(crate) path: PathBuf,
     original_path: PathBuf,
-    sha256: String,
+    pub(crate) sha256: String,
     size: u64,
     modified_at: Option<DateTime<Utc>>,
-    discovered_at: DateTime<Utc>,
+    pub(crate) discovered_at: DateTime<Utc>,
     extension: String,
     #[serde(default = "default_active")]
-    active: bool,
+    pub(crate) active: bool,
     #[serde(default)]
     removed_at: Option<DateTime<Utc>>,
 }
@@ -284,12 +302,20 @@ fn default_active() -> bool {
     true
 }
 
+impl ImageRecord {
+    pub(crate) fn has_same_file_fingerprint(&self, other: &Self) -> bool {
+        self.sha256 == other.sha256
+            && self.size == other.size
+            && self.modified_at == other.modified_at
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
-struct CaptionRecord {
-    image_id: String,
-    path: PathBuf,
-    title: String,
-    description: String,
+pub(crate) struct CaptionRecord {
+    pub(crate) image_id: String,
+    pub(crate) path: PathBuf,
+    pub(crate) title: String,
+    pub(crate) description: String,
     model: String,
     provider: String,
     created_at: DateTime<Utc>,
@@ -385,6 +411,7 @@ fn main() -> Result<()> {
         Command::Caption(args) => cmd_caption(&paths, args),
         Command::Rename(args) => cmd_rename(&paths, args),
         Command::Search(args) => cmd_search(&paths, args),
+        Command::Vdr(args) => vdr::cmd_vdr(&paths, args),
         Command::Status => cmd_status(&paths),
         Command::Skill { command } => match command {
             SkillCommand::Path => cmd_skill_path(&paths),
@@ -481,17 +508,22 @@ fn cmd_bootstrap(paths: &AppPaths, args: &IngestArgs) -> Result<BootstrapStats> 
         write_json_pretty(&paths.config, &AppConfig::default())?;
     }
     let existing = latest_images_by_path(paths)?;
-    let mut seen_paths: HashSet<PathBuf> = existing.keys().cloned().collect();
+    let mut seen_paths: HashSet<PathBuf> = HashSet::new();
     let mut ingested = 0;
     for image_path in candidate_image_paths(paths, args)? {
         let canonical = fs::canonicalize(&image_path).unwrap_or(image_path.clone());
         if seen_paths.contains(&canonical) {
             continue;
         }
+        seen_paths.insert(canonical.clone());
         match build_image_record(&canonical) {
             Ok(record) => {
+                if let Some(previous) = existing.get(&canonical)
+                    && previous.has_same_file_fingerprint(&record)
+                {
+                    continue;
+                }
                 append_jsonl(&paths.images, &record)?;
-                seen_paths.insert(record.path.clone());
                 ingested += 1;
             }
             Err(err) => log_error(paths, "ingest", err),
@@ -1144,6 +1176,17 @@ fn cmd_search(paths: &AppPaths, args: SearchArgs) -> Result<()> {
     let query = nfc(&args.keywords.join(" "));
     let captions = latest_captions_by_path(paths)?;
     let images = latest_images(paths)?;
+    if matches!(args.mode, SearchMode::Embedding) {
+        return vdr::cmd_embedding_search(
+            paths,
+            &query,
+            args.limit,
+            args.json,
+            args.embedding_url.as_deref(),
+            images,
+            captions,
+        );
+    }
     let candidates = build_candidates(images, &captions);
 
     if args.no_fuzzy {
@@ -1302,8 +1345,28 @@ fn active_folders(paths: &AppPaths) -> Result<Vec<FolderRecord>> {
     Ok(folders)
 }
 
-fn latest_images(paths: &AppPaths) -> Result<Vec<ImageRecord>> {
+pub(crate) fn latest_images(paths: &AppPaths) -> Result<Vec<ImageRecord>> {
     Ok(latest_images_by_path(paths)?.into_values().collect())
+}
+
+pub(crate) fn latest_images_refreshing_changed_files(
+    paths: &AppPaths,
+) -> Result<(Vec<ImageRecord>, bool)> {
+    let mut images = latest_images(paths)?;
+    let mut refreshed = false;
+    for image in &mut images {
+        if !image.path.exists() {
+            continue;
+        }
+        let current = build_image_record(&image.path)?;
+        if image.has_same_file_fingerprint(&current) {
+            continue;
+        }
+        append_jsonl(&paths.images, &current)?;
+        *image = current;
+        refreshed = true;
+    }
+    Ok((images, refreshed))
 }
 
 fn latest_images_by_path(paths: &AppPaths) -> Result<HashMap<PathBuf, ImageRecord>> {
@@ -1325,7 +1388,7 @@ fn latest_captions(paths: &AppPaths) -> Result<Vec<CaptionRecord>> {
     Ok(latest_captions_by_path(paths)?.into_values().collect())
 }
 
-fn latest_captions_by_path(paths: &AppPaths) -> Result<HashMap<PathBuf, CaptionRecord>> {
+pub(crate) fn latest_captions_by_path(paths: &AppPaths) -> Result<HashMap<PathBuf, CaptionRecord>> {
     let mut captions = HashMap::new();
     for caption in read_jsonl::<CaptionRecord>(&paths.captions)? {
         captions.insert(caption.path.clone(), caption);
