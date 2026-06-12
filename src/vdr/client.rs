@@ -12,10 +12,16 @@ pub(super) struct EmbedInput {
     pub(super) value: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 pub(super) struct EmbedResponse {
     pub(super) model: String,
-    pub(super) embeddings: Vec<Vec<f32>>,
+    pub(super) embeddings: Vec<Vec<Vec<f32>>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawEmbedResponse {
+    model: String,
+    embeddings: Vec<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -52,11 +58,37 @@ pub(super) fn embed(
         .error_for_status()
         .with_context(|| format!("VDR embedding server returned an error at {url}"))?
         .json()?;
-    let parsed: EmbedResponse = serde_json::from_value(response)?;
-    if parsed.embeddings.iter().any(Vec::is_empty) {
-        bail!("embedding server returned an empty vector");
+    let raw: RawEmbedResponse = serde_json::from_value(response)?;
+    let mut embeddings = Vec::with_capacity(raw.embeddings.len());
+    for value in raw.embeddings {
+        embeddings.push(parse_multivector(value)?);
     }
-    Ok(parsed)
+    Ok(EmbedResponse {
+        model: raw.model,
+        embeddings,
+    })
+}
+
+/// Accepts a single vector (`[f32, …]`) or a multi-vector (`[[f32, …], …]`),
+/// normalizing both to the multi-vector shape.
+fn parse_multivector(value: Value) -> Result<Vec<Vec<f32>>> {
+    let Value::Array(items) = value else {
+        bail!("embedding server returned a non-array embedding");
+    };
+    match items.first() {
+        None => bail!("embedding server returned an empty vector"),
+        Some(Value::Array(_)) => {
+            let rows: Vec<Vec<f32>> = serde_json::from_value(Value::Array(items))?;
+            if rows.iter().any(Vec::is_empty) {
+                bail!("embedding server returned an empty vector row");
+            }
+            Ok(rows)
+        }
+        Some(_) => {
+            let row: Vec<f32> = serde_json::from_value(Value::Array(items))?;
+            Ok(vec![row])
+        }
+    }
 }
 
 pub(super) fn query_input(query: &str) -> EmbedInput {

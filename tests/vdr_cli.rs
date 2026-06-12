@@ -6,6 +6,82 @@ mod vdr_support;
 use vdr_support::{FakeEmbeddingServer, assert_success, image_id_for, run, write_caption};
 
 #[test]
+fn vdr_late_interaction_ranks_with_multivector_maxsim() {
+    // Given: a multi-vector (late-interaction) embedding server and two images.
+    let server = FakeEmbeddingServer::start_multivector();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).expect("create images");
+    fs::write(images.join("dog.png"), b"dog image bytes").expect("write dog image");
+    fs::write(images.join("cat.png"), b"cat image bytes").expect("write cat image");
+
+    assert_success(run(&config, &["init"], server.url()));
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", images.to_str().expect("utf8")],
+        server.url(),
+    ));
+    let (dog_id, dog_path) = image_id_for(&config, "dog.png");
+    let (cat_id, cat_path) = image_id_for(&config, "cat.png");
+    write_caption(
+        &config,
+        &dog_id,
+        &dog_path,
+        "Dog Park",
+        "puppy playing outside",
+    );
+    write_caption(
+        &config,
+        &cat_id,
+        &cat_path,
+        "Cat Sofa",
+        "kitten sleeping indoors",
+    );
+
+    // When: sync stores multi-vectors and a multi-token query searches.
+    let synced = assert_success(run(&config, &["vdr", "sync"], server.url()));
+    assert!(
+        synced.contains("indexed 4"),
+        "expected paired vectors, got: {synced}"
+    );
+    let search = assert_success(run(
+        &config,
+        &[
+            "search",
+            "--mode",
+            "embedding",
+            "puppy playing",
+            "--json",
+            "--limit",
+            "2",
+        ],
+        server.url(),
+    ));
+
+    // Then: MaxSim over token vectors ranks the dog image first with the
+    // average of per-token maxima, proving real late interaction.
+    let rows: Vec<serde_json::Value> = search
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("json result"))
+        .collect();
+    assert_eq!(rows.len(), 2, "expected two rows, got: {search}");
+    assert!(
+        rows[0]["path"].as_str().expect("path").ends_with("dog.png"),
+        "dog should rank first, got: {search}"
+    );
+    let top = rows[0]["score"].as_f64().expect("score");
+    let bottom = rows[1]["score"].as_f64().expect("score");
+    // Query "puppy playing" = [dog-axis, other-axis]; the dog caption doc has
+    // both axes so MaxSim = (1.0 + 1.0) / 2 = 1.0, cat doc = (0.0 + 1.0) / 2.
+    assert!((top - 1.0).abs() < 1e-6, "expected maxsim 1.0, got {top}");
+    assert!(
+        (bottom - 0.5).abs() < 1e-6,
+        "expected maxsim 0.5, got {bottom}"
+    );
+}
+
+#[test]
 fn vdr_embedding_search_matches_image_or_caption_embeddings() {
     // Given: two tracked images with captions whose text embeddings are distinct.
     let server = FakeEmbeddingServer::start();

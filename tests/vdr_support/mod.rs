@@ -41,6 +41,15 @@ pub(crate) struct FakeEmbeddingServer {
 
 impl FakeEmbeddingServer {
     pub(crate) fn start() -> Self {
+        Self::start_with_mode(false)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn start_multivector() -> Self {
+        Self::start_with_mode(true)
+    }
+
+    fn start_with_mode(multivector: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake embedding server");
         let url = format!(
             "http://{}",
@@ -51,7 +60,7 @@ impl FakeEmbeddingServer {
         let handle = thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 request_count.fetch_add(1, Ordering::SeqCst);
-                handle_request(stream);
+                handle_request(stream, multivector);
             }
         });
         Self {
@@ -112,7 +121,7 @@ fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_clawgallery"))
 }
 
-fn handle_request(mut stream: TcpStream) {
+fn handle_request(mut stream: TcpStream, multivector: bool) {
     let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
     let mut content_len = 0_usize;
     loop {
@@ -133,12 +142,22 @@ fn handle_request(mut stream: TcpStream) {
     reader.read_exact(&mut body).expect("read request body");
     let request: serde_json::Value = serde_json::from_slice(&body).expect("json request");
     let inputs = request["inputs"].as_array().expect("inputs array");
-    let embeddings: Vec<_> = inputs.iter().map(embedding_for).collect();
-    let response = serde_json::json!({
-        "model": "jinaai/jina-embeddings-v5-omni-small",
-        "dimensions": 4,
-        "embeddings": embeddings
-    });
+    let model = request["model"].as_str().unwrap_or("test-model");
+    let response = if multivector {
+        let embeddings: Vec<_> = inputs.iter().map(multivector_for).collect();
+        serde_json::json!({
+            "model": model,
+            "dimensions": 4,
+            "embeddings": embeddings
+        })
+    } else {
+        let embeddings: Vec<_> = inputs.iter().map(embedding_for).collect();
+        serde_json::json!({
+            "model": model,
+            "dimensions": 4,
+            "embeddings": embeddings
+        })
+    };
     let body = response.to_string();
     let reply = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
@@ -159,4 +178,29 @@ fn embedding_for(input: &serde_json::Value) -> Vec<f32> {
     } else {
         vec![0.0, 0.0, 0.0, 1.0]
     }
+}
+
+/// Emits one token-level vector per word so MaxSim has multiple rows to
+/// reduce over, mimicking a late-interaction model.
+fn multivector_for(input: &serde_json::Value) -> Vec<Vec<f32>> {
+    let haystack = input["value"].as_str().unwrap_or_default().to_lowercase();
+    let mut rows: Vec<Vec<f32>> = haystack
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(|word| {
+            if word.contains("dog") || word.contains("puppy") {
+                vec![1.0, 0.0, 0.0, 0.0]
+            } else if word.contains("cat") || word.contains("kitten") {
+                vec![0.0, 1.0, 0.0, 0.0]
+            } else if word.contains("new") || word.contains("fresh") {
+                vec![0.0, 0.0, 1.0, 0.0]
+            } else {
+                vec![0.0, 0.0, 0.0, 1.0]
+            }
+        })
+        .collect();
+    if rows.is_empty() {
+        rows.push(vec![0.0, 0.0, 0.0, 1.0]);
+    }
+    rows
 }

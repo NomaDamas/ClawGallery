@@ -134,7 +134,7 @@ pub(super) fn insert_vector(
     item: &PendingEmbedding,
     model: &str,
     dimensions: usize,
-    vector: &[f32],
+    vectors: &[Vec<f32>],
 ) -> Result<()> {
     let path = item.path.to_string_lossy();
     conn.execute(
@@ -149,7 +149,7 @@ pub(super) fn insert_vector(
             model,
             dimensions,
             item.content_hash,
-            serde_json::to_string(vector)?,
+            serde_json::to_string(vectors)?,
             Utc::now().to_rfc3339()
         ],
     )?;
@@ -188,7 +188,7 @@ pub(super) fn active_vectors(
             image_id,
             path: PathBuf::from(path),
             kind,
-            vector: serde_json::from_str(&vector_json)?,
+            vectors: parse_stored_vectors(&vector_json)?,
         });
     }
     Ok(vectors)
@@ -244,10 +244,21 @@ fn content_hash(value: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// Parses stored vector JSON, accepting both the legacy single-vector shape
+/// (`[f32, …]`) and the multi-vector shape (`[[f32, …], …]`).
+fn parse_stored_vectors(vector_json: &str) -> Result<Vec<Vec<f32>>> {
+    let value: serde_json::Value = serde_json::from_str(vector_json)?;
+    match value.as_array().and_then(|items| items.first()) {
+        Some(serde_json::Value::Array(_)) => Ok(serde_json::from_value(value)?),
+        Some(_) => Ok(vec![serde_json::from_value(value)?]),
+        None => Ok(Vec::new()),
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct StoredVector {
     pub(super) image_id: String,
     pub(super) path: PathBuf,
     pub(super) kind: EmbeddingKind,
-    pub(super) vector: Vec<f32>,
+    pub(super) vectors: Vec<Vec<f32>>,
 }

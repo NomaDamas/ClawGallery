@@ -11,8 +11,8 @@ mod store;
 pub(crate) use search::cmd_embedding_search;
 
 const DEFAULT_EMBEDDING_URL: &str = "http://127.0.0.1:8765";
-const DEFAULT_VDR_MODEL: &str = "jinaai/jina-embeddings-v5-omni-small";
-const DEFAULT_DIMENSIONS: usize = 1024;
+const DEFAULT_VDR_MODEL: &str = "vidore/colqwen2-v1.0";
+const DEFAULT_DIMENSIONS: usize = 128;
 
 #[derive(Debug, Args)]
 pub(crate) struct VdrArgs {

@@ -36,7 +36,7 @@ pub(crate) fn cmd_embedding_search(
         index_config.dimensions,
         vec![query_input(query)],
     )?;
-    let query_vector = response
+    let query_vectors = response
         .embeddings
         .into_iter()
         .next()
@@ -55,7 +55,7 @@ pub(crate) fn cmd_embedding_search(
         let Some(image) = active_images.get(&stored.image_id) else {
             continue;
         };
-        let score = cosine_similarity(&query_vector, &stored.vector)?;
+        let score = late_interaction_score(&query_vectors, &stored.vectors)?;
         let caption = captions.get(&image.path);
         let hit = EmbeddingSearchHit {
             path: stored.path,
@@ -126,6 +126,28 @@ fn print_hit(hit: EmbeddingSearchHit, query: &str, json_output: bool) -> Result<
         );
     }
     Ok(())
+}
+
+/// ColBERT-style late-interaction MaxSim: for each query token vector, take
+/// the maximum cosine similarity over all document vectors, then average over
+/// query tokens. With single-vector inputs (1x1) this degenerates to plain
+/// cosine similarity, so legacy single-vector indexes keep working.
+fn late_interaction_score(query: &[Vec<f32>], document: &[Vec<f32>]) -> Result<f64> {
+    if query.is_empty() || document.is_empty() {
+        return Ok(0.0);
+    }
+    let mut total = 0.0_f64;
+    for query_vector in query {
+        let mut best = f64::NEG_INFINITY;
+        for document_vector in document {
+            let score = cosine_similarity(query_vector, document_vector)?;
+            if score > best {
+                best = score;
+            }
+        }
+        total += best;
+    }
+    Ok(total / query.len() as f64)
 }
 
 fn cosine_similarity(left: &[f32], right: &[f32]) -> Result<f64> {
