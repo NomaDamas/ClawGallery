@@ -36,6 +36,7 @@ clawgallery search "!error" "^login"
 Search by local VDR embeddings:
 
 ```bash
+uv pip install torch pillow sentence-transformers transformers einops timm peft
 python scripts/jina_omni_server.py --device auto
 clawgallery vdr sync
 clawgallery search --mode embedding "github actions" --json

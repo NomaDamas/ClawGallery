@@ -23,7 +23,7 @@ clawgallery rename --dry-run
 Semantic image search through local VDR:
 
 ```bash
-uv pip install torch pillow sentence-transformers transformers einops timm
+uv pip install torch pillow sentence-transformers transformers einops timm peft
 python scripts/jina_omni_server.py --device auto
 clawgallery vdr sync
 clawgallery search --mode embedding "login error" --json
@@ -141,6 +141,8 @@ The bundled macOS-oriented server script uses `jinaai/jina-embeddings-v5-omni-sm
 ```bash
 python scripts/jina_omni_server.py --host 127.0.0.1 --port 8765 --device auto
 ```
+
+If Hugging Face xet downloads stall on macOS, retry the first run with `HF_HUB_DISABLE_XET=1`.
 
 Set `CLAWGALLERY_VDR_EMBEDDING_URL` or pass `--embedding-url` to point the CLI at a different compatible local server.
 

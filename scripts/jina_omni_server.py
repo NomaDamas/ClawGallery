@@ -61,6 +61,7 @@ def make_server(model_name, device):
                         items.append(str(item.get("value", "")))
                 encoded = model.encode(
                     items,
+                    task="retrieval",
                     normalize_embeddings=True,
                     convert_to_numpy=True,
                     show_progress_bar=False,
