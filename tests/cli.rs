@@ -957,6 +957,70 @@ fn rename_apply_continues_after_per_image_failure() {
 }
 
 #[test]
+fn rename_apply_existing_target_does_not_clobber() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).unwrap();
+    let source = images.join("IMG_0100.png");
+    let target = images.join("existing-title.png");
+    fs::write(&source, b"source bytes").unwrap();
+    fs::write(&target, b"target bytes").unwrap();
+    assert_success(run(&config, &["init"]));
+    assert_success(run(&config, &["folder", "add", images.to_str().unwrap()]));
+    assert_success(run(&config, &["bootstrap"]));
+    let canonical = source.canonicalize().unwrap();
+    let id = first_image_id(&config);
+    inject_caption(&config, &canonical, &id, "Existing Title", Some(false));
+
+    let output = run(&config, &["rename", "--apply", "--style", "title"]);
+    assert!(
+        output.status.success(),
+        "rename collision is a per-image failure, not a process failure\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    assert!(
+        stdout.contains("existing-title-1.png"),
+        "occupied target must be avoided via collision suffix, got: {stdout}"
+    );
+    assert!(
+        !target.exists() || fs::read(&target).unwrap() == b"target bytes",
+        "pre-existing target must never be overwritten"
+    );
+    assert_eq!(
+        fs::read(images.join("existing-title-1.png")).unwrap(),
+        b"source bytes"
+    );
+    assert!(!source.exists(), "source must be moved");
+}
+
+#[test]
+fn final_error_masks_api_keys_in_stderr() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    assert_success(run(&config, &["init"]));
+    let output = run(
+        &config,
+        &[
+            "search",
+            "--mode",
+            "embedding",
+            "--embedding-url",
+            "http://127.0.0.1:9/embed?key=sk-1234567890abcdef&gemini=AIza1234567890abcdef1234567890abcdef1234",
+            "needle",
+        ],
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.starts_with("Error: "), "got: {stderr}");
+    assert!(!stderr.contains("sk-"), "got: {stderr}");
+    assert!(!stderr.contains("AIza"), "got: {stderr}");
+    assert!(!stderr.contains("?key=sk-"), "got: {stderr}");
+    assert!(!stderr.contains("key="), "got: {stderr}");
+}
+
+#[test]
 fn rename_dry_run_self_heals_when_source_missing() {
     let temp = tempfile::tempdir().unwrap();
     let config = temp.path().join("state");

@@ -58,7 +58,7 @@ pub(crate) fn cmd_embedding_search(
         let score = late_interaction_score(&query_vectors, &stored.vectors)?;
         let caption = captions.get(&image.path);
         let hit = EmbeddingSearchHit {
-            path: stored.path,
+            path: image.path.clone(),
             title: caption
                 .map(|c| c.title.clone())
                 .unwrap_or_else(|| "<missing>".to_string()),

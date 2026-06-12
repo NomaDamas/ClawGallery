@@ -10,9 +10,13 @@ Requires: pip install colpali-engine torch pillow
 """
 import argparse
 import importlib
+import ipaddress
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+VALID_KINDS = {"image", "text", "caption"}
+
 
 DEFAULT_MODEL = "vidore/colqwen2-v1.0"
 
@@ -23,6 +27,11 @@ def parse_args():
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--device", default="auto", choices=["auto", "mps", "cpu", "cuda"])
+    parser.add_argument(
+        "--allow-remote",
+        action="store_true",
+        help="allow binding this unauthenticated local-file-reading server to a non-loopback host",
+    )
     return parser.parse_args()
 
 
@@ -35,6 +44,26 @@ def choose_device(requested):
     if torch.cuda.is_available():
         return "cuda"
     return "cpu"
+
+
+def is_loopback_host(host):
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def validate_bind_host(args):
+    if is_loopback_host(args.host) or args.allow_remote:
+        return
+    raise SystemExit(
+        "error: refusing to bind unauthenticated /embed server to non-loopback host "
+        f"{args.host!r} without --allow-remote; this server can read arbitrary "
+        "local files requested by clients"
+    )
+
 
 
 def make_server(model_name, device):
@@ -73,11 +102,23 @@ def make_server(model_name, device):
                 return
             length = int(self.headers.get("content-length", "0"))
             payload = json.loads(self.rfile.read(length))
+            def send_json_error(status, message):
+                body = json.dumps({"error": message}).encode()
+                self.send_response(status)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
             opened = []
             try:
                 images, texts, order = [], [], []
                 for item in payload.get("inputs", []):
-                    if item.get("kind") == "image":
+                    kind = item.get("kind")
+                    if kind not in VALID_KINDS:
+                        send_json_error(400, f"invalid input kind {kind!r}; expected image, text, or caption")
+                        return
+                    if kind == "image":
                         image = image_module.open(Path(item["value"])).convert("RGB")
                         opened.append(image)
                         order.append(("image", len(images)))
@@ -105,12 +146,7 @@ def make_server(model_name, device):
                 self.end_headers()
                 self.wfile.write(body)
             except Exception as exc:
-                body = json.dumps({"error": str(exc)}).encode()
-                self.send_response(500)
-                self.send_header("content-type", "application/json")
-                self.send_header("content-length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                send_json_error(500, str(exc))
             finally:
                 for image in opened:
                     image.close()
@@ -123,6 +159,7 @@ def make_server(model_name, device):
 
 def main():
     args = parse_args()
+    validate_bind_host(args)
     device = choose_device(args.device)
     handler = make_server(args.model, device)
     server = ThreadingHTTPServer((args.host, args.port), handler)

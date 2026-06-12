@@ -12,7 +12,7 @@ Use this skill when an agent needs to find, inspect, caption, or organize local 
 - `clawgallery rename` is dry-run unless `--apply` is explicitly passed.
 - State is JSONL under `~/.config/clawgallery` unless `CLAWGALLERY_CONFIG_DIR` is set.
 - The CLI does not require a database or embeddings.
-- Model captioning requires `OPENAI_API_KEY` or best-effort Codex auth in `$CODEX_HOME/auth.json` / `~/.codex/auth.json`.
+- Model captioning requires `OPENAI_API_KEY` or best-effort Codex auth in `$CODEX_HOME/auth.json` / `~/.codex/auth.json`; Gemini captioning uses `--provider gemini` with `GEMINI_API_KEY` and defaults to `gemini-2.5-flash`.
 
 ## Common workflows
 
@@ -33,14 +33,24 @@ clawgallery search "'github" "actions" --json
 clawgallery search "!error" "^login"
 ```
 
-Search by local VDR embeddings:
+Search by local VDR embeddings (default: `vidore/colqwen2-v1.0`, dimensions `128`):
 
 ```bash
-uv pip install torch pillow sentence-transformers transformers einops timm peft
-python scripts/jina_omni_server.py --device auto
+uv pip install colpali-engine torch pillow
+python scripts/colqwen2_server.py --device auto
 clawgallery vdr sync
 clawgallery search --mode embedding "github actions" --json
 ```
+
+Alternative Jina Omni path:
+
+```bash
+python scripts/jina_omni_server.py --device auto
+clawgallery vdr sync --model jinaai/jina-embeddings-v5-omni-small --dimensions 1024
+clawgallery search --mode embedding "github actions" --json
+```
+
+Jina search must use the same model and dimensions as the synced VDR index. The Jina server enables Hugging Face `trust_remote_code`; if Hugging Face xet downloads stall on macOS, retry the first run with `HF_HUB_DISABLE_XET=1`.
 
 Search supports fzf-style atoms: whitespace means AND, `'foo` means exact substring, `^foo` means prefix, `foo$` means suffix, `!foo` excludes a substring, and `\ ` escapes a literal space inside one atom. Default text output includes score/matches metadata; use `--no-fuzzy` for the old exact substring format.
 
@@ -92,7 +102,7 @@ ClawGallery state is split into three append-only JSONL event logs that join via
 | `images.jsonl` | `bootstrap`, `bootstrap --prune`, `rename --apply` | `ImageRecord` per discovery, prune, or rename |
 | `captions.jsonl` | `caption` | `CaptionRecord` per successful model call |
 | `renames.jsonl` | `rename` | `RenameRecord` per dry-run or apply attempt |
-| `vdr.sqlite3` | `vdr sync` | paired active image and caption embedding rows |
+| `vdr.sqlite3` | `vdr sync` | active image embeddings plus caption embedding rows only when captions exist |
 
 The three steps are deliberately separated so cheap, free, idempotent indexing (`bootstrap`) is decoupled from paid network calls (`caption`) and from irreversible filesystem mutations (`rename --apply`).
 

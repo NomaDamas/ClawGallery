@@ -41,6 +41,22 @@ pub(super) fn open_store(paths: &AppPaths) -> Result<Connection> {
     Ok(conn)
 }
 
+pub(super) fn update_active_vector_paths(
+    conn: &Connection,
+    active_images: &[ImageRecord],
+    model: &str,
+    dimensions: usize,
+) -> Result<()> {
+    for image in active_images {
+        let path = image.path.to_string_lossy();
+        conn.execute(
+            "update vdr_embeddings set path = ?1
+             where image_id = ?2 and model = ?3 and dimensions = ?4 and active = 1 and path <> ?1",
+            params![path.as_ref(), image.id, model, dimensions],
+        )?;
+    }
+    Ok(())
+}
 pub(super) fn pending_embeddings(
     conn: &Connection,
     images: Vec<ImageRecord>,
@@ -163,19 +179,18 @@ pub(super) fn active_vectors(
     dimensions: usize,
 ) -> Result<Vec<StoredVector>> {
     let mut stmt = conn.prepare(
-        "select image_id, path, kind, vector_json from vdr_embeddings
+        "select image_id, kind, vector_json from vdr_embeddings
          where active = 1 and model = ?1 and dimensions = ?2",
     )?;
     let rows = stmt.query_map(params![model, dimensions], |row| {
         let image_id: String = row.get(0)?;
-        let path: String = row.get(1)?;
-        let kind: String = row.get(2)?;
-        let vector_json: String = row.get(3)?;
-        Ok((image_id, path, kind, vector_json))
+        let kind: String = row.get(1)?;
+        let vector_json: String = row.get(2)?;
+        Ok((image_id, kind, vector_json))
     })?;
     let mut vectors = Vec::new();
     for row in rows {
-        let (image_id, path, kind, vector_json) = row?;
+        let (image_id, kind, vector_json) = row?;
         if !active_images.contains_key(&image_id) {
             continue;
         }
@@ -186,7 +201,6 @@ pub(super) fn active_vectors(
         };
         vectors.push(StoredVector {
             image_id,
-            path: PathBuf::from(path),
             kind,
             vectors: parse_stored_vectors(&vector_json)?,
         });
@@ -258,7 +272,6 @@ fn parse_stored_vectors(vector_json: &str) -> Result<Vec<Vec<f32>>> {
 #[derive(Debug)]
 pub(super) struct StoredVector {
     pub(super) image_id: String,
-    pub(super) path: PathBuf,
     pub(super) kind: EmbeddingKind,
     pub(super) vectors: Vec<Vec<f32>>,
 }

@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 import argparse
 import importlib
+import ipaddress
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+
+VALID_KINDS = {"image", "text", "caption"}
 
 
 def parse_args():
@@ -12,6 +16,11 @@ def parse_args():
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--model", default="jinaai/jina-embeddings-v5-omni-small")
     parser.add_argument("--device", default="auto", choices=["auto", "mps", "cpu", "cuda"])
+    parser.add_argument(
+        "--allow-remote",
+        action="store_true",
+        help="allow binding this unauthenticated local-file-reading server to a non-loopback host",
+    )
     return parser.parse_args()
 
 
@@ -34,6 +43,26 @@ def normalize(vector):
     return [value / norm for value in vector]
 
 
+def is_loopback_host(host):
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def validate_bind_host(args):
+    if is_loopback_host(args.host) or args.allow_remote:
+        return
+    raise SystemExit(
+        "error: refusing to bind unauthenticated /embed server to non-loopback host "
+        f"{args.host!r} without --allow-remote; this server can read arbitrary "
+        "local files requested by clients"
+    )
+
+
+
 def make_server(model_name, device):
     image_module = importlib.import_module("PIL.Image")
     sentence_transformers = importlib.import_module("sentence_transformers")
@@ -49,11 +78,23 @@ def make_server(model_name, device):
             length = int(self.headers.get("content-length", "0"))
             payload = json.loads(self.rfile.read(length))
             dimensions = int(payload.get("dimensions") or 1024)
+            def send_json_error(status, message):
+                body = json.dumps({"error": message}).encode()
+                self.send_response(status)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
             items = []
             opened = []
             try:
                 for item in payload.get("inputs", []):
-                    if item.get("kind") == "image":
+                    kind = item.get("kind")
+                    if kind not in VALID_KINDS:
+                        send_json_error(400, f"invalid input kind {kind!r}; expected image, text, or caption")
+                        return
+                    if kind == "image":
                         image = image_module.open(Path(item["value"])).convert("RGB")
                         opened.append(image)
                         items.append(image)
@@ -82,12 +123,7 @@ def make_server(model_name, device):
                 self.end_headers()
                 self.wfile.write(body)
             except Exception as exc:
-                body = json.dumps({"error": str(exc)}).encode()
-                self.send_response(500)
-                self.send_header("content-type", "application/json")
-                self.send_header("content-length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                send_json_error(500, str(exc))
             finally:
                 for image in opened:
                     image.close()
@@ -100,6 +136,7 @@ def make_server(model_name, device):
 
 def main():
     args = parse_args()
+    validate_bind_host(args)
     device = choose_device(args.device)
     handler = make_server(args.model, device)
     server = ThreadingHTTPServer((args.host, args.port), handler)

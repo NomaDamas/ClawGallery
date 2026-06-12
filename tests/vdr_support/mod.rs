@@ -44,12 +44,23 @@ impl FakeEmbeddingServer {
         Self::start_with_mode(false)
     }
 
+    pub(crate) fn start_with_response_model(model: &'static str) -> Self {
+        Self::start_with_mode_and_response_model(false, Some(model))
+    }
+
     #[allow(dead_code)]
     pub(crate) fn start_multivector() -> Self {
-        Self::start_with_mode(true)
+        Self::start_with_mode_and_response_model(true, None)
     }
 
     fn start_with_mode(multivector: bool) -> Self {
+        Self::start_with_mode_and_response_model(multivector, None)
+    }
+
+    fn start_with_mode_and_response_model(
+        multivector: bool,
+        response_model: Option<&'static str>,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake embedding server");
         let url = format!(
             "http://{}",
@@ -60,7 +71,7 @@ impl FakeEmbeddingServer {
         let handle = thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 request_count.fetch_add(1, Ordering::SeqCst);
-                handle_request(stream, multivector);
+                handle_request(stream, multivector, response_model);
             }
         });
         Self {
@@ -121,7 +132,7 @@ fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_clawgallery"))
 }
 
-fn handle_request(mut stream: TcpStream, multivector: bool) {
+fn handle_request(mut stream: TcpStream, multivector: bool, response_model: Option<&'static str>) {
     let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
     let mut content_len = 0_usize;
     loop {
@@ -143,17 +154,18 @@ fn handle_request(mut stream: TcpStream, multivector: bool) {
     let request: serde_json::Value = serde_json::from_slice(&body).expect("json request");
     let inputs = request["inputs"].as_array().expect("inputs array");
     let model = request["model"].as_str().unwrap_or("test-model");
+    let response_model = response_model.unwrap_or(model);
     let response = if multivector {
         let embeddings: Vec<_> = inputs.iter().map(multivector_for).collect();
         serde_json::json!({
-            "model": model,
+            "model": response_model,
             "dimensions": 4,
             "embeddings": embeddings
         })
     } else {
         let embeddings: Vec<_> = inputs.iter().map(embedding_for).collect();
         serde_json::json!({
-            "model": model,
+            "model": response_model,
             "dimensions": 4,
             "embeddings": embeddings
         })

@@ -20,14 +20,24 @@ clawgallery caption --dry-run
 clawgallery rename --dry-run
 ```
 
-Semantic image search through local VDR:
+Semantic image search through local VDR (default: `vidore/colqwen2-v1.0`, dimensions `128`):
 
 ```bash
-uv pip install torch pillow sentence-transformers transformers einops timm peft
-python scripts/jina_omni_server.py --device auto
+uv pip install colpali-engine torch pillow
+python scripts/colqwen2_server.py --device auto
 clawgallery vdr sync
 clawgallery search --mode embedding "login error" --json
 ```
+
+Alternative Jina Omni embedding path:
+
+```bash
+python scripts/jina_omni_server.py --device auto
+clawgallery vdr sync --model jinaai/jina-embeddings-v5-omni-small --dimensions 1024
+clawgallery search --mode embedding "login error" --json
+```
+
+Jina search must use the same model and dimensions as the synced VDR index. The Jina server enables Hugging Face `trust_remote_code`; if Hugging Face xet downloads stall on macOS, retry the first run with `HF_HUB_DISABLE_XET=1`.
 
 Continuous polling:
 
@@ -95,7 +105,7 @@ clawgallery folder add <path> [--recursive]
 clawgallery folder remove <id-or-path>
 clawgallery folder list
 clawgallery bootstrap [--folder <id>] [--path <path>] [--prune]
-clawgallery poll [--once] [--interval <seconds>] [--prune]
+clawgallery poll [--folder <id>] [--path <path>] [--once] [--interval <seconds>] [--prune]
 clawgallery caption [--missing] [--file <path>] [--dry-run] [--model <model>] [--provider <provider>]
 clawgallery rename [--apply] [--dry-run] [--file <path>] [--style title|caption|date-title] [--force]
 clawgallery search [--mode keyword|embedding] <query...> [--limit <n>] [--json] [--case-sensitive] [--no-fuzzy] [--embedding-url <url>]
@@ -127,23 +137,28 @@ Lowercase queries use smart-case matching; any uppercase atom becomes case-sensi
 
 ## Visual Document Retrieval
 
-VDR stores paired image and caption embeddings for each active image in `vdr.sqlite3`. The store is embedded SQLite so it needs no daemon, works well on macOS, and stays inside the same config directory as the JSONL state. `clawgallery vdr sync` is incremental: unchanged image and caption content hashes are skipped, changed files or captions are re-embedded, and `--prune` deactivates vectors for images that are no longer active after `bootstrap --prune`.
+VDR stores image embeddings for every active image and stores caption embeddings only when an active image has caption text. The store is embedded SQLite so it needs no daemon, works well on macOS, and stays inside the same config directory as the JSONL state. `clawgallery vdr sync` is incremental: unchanged image and caption content hashes are skipped, changed files or captions are re-embedded, and `--prune` deactivates vectors for images that are no longer active after `bootstrap --prune`.
 
-The local embedding server contract is:
+The local embedding server contract accepts `kind` values `image`, `text`, or `caption`; `caption` is caption-document text encoded like text. `role` is `document` or `query` and a compatible server may ignore it. Responses may contain either one vector per input or multi-vector embeddings per input.
 
 ```text
 POST /embed
-{"model":"jinaai/jina-embeddings-v5-omni-small","dimensions":1024,"inputs":[{"kind":"image|text","role":"document|query","value":"path or text"}]}
+{"model":"vidore/colqwen2-v1.0","dimensions":128,"inputs":[{"kind":"image|text|caption","role":"document|query","value":"path or text"}]}
 ```
 
-The bundled macOS-oriented server script uses `jinaai/jina-embeddings-v5-omni-small` through `sentence-transformers`, enables Hugging Face remote model code, and chooses Apple MPS automatically when available:
+The bundled default local server uses `vidore/colqwen2-v1.0` with 128-dimensional ColQwen2 embeddings:
+
+```bash
+python scripts/colqwen2_server.py --host 127.0.0.1 --port 8765 --device auto
+```
+
+The alternative Jina Omni path uses `jinaai/jina-embeddings-v5-omni-small` through `sentence-transformers`, enables Hugging Face remote model code, and uses 1024 dimensions. Pass matching `--model jinaai/jina-embeddings-v5-omni-small --dimensions 1024` to `clawgallery vdr sync` when using it; embedding search should then query the same synced VDR index.
 
 ```bash
 python scripts/jina_omni_server.py --host 127.0.0.1 --port 8765 --device auto
 ```
 
 If Hugging Face xet downloads stall on macOS, retry the first run with `HF_HUB_DISABLE_XET=1`.
-
 Set `CLAWGALLERY_VDR_EMBEDDING_URL` or pass `--embedding-url` to point the CLI at a different compatible local server.
 
 ## Rename safety

@@ -91,6 +91,7 @@ fn cmd_sync(paths: &AppPaths, args: VdrSyncArgs) -> Result<()> {
     if args.prune || refreshed_files {
         store::prune_inactive_vectors(&conn, &images)?;
     }
+    store::update_active_vector_paths(&conn, &images, &args.model, args.dimensions)?;
     let pending =
         store::pending_embeddings(&conn, images, &captions, &args.model, args.dimensions)?;
     if pending.is_empty() {

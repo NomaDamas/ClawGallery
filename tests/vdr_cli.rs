@@ -1,4 +1,4 @@
-use std::fs;
+use std::{fs, io::Write};
 
 #[path = "vdr_support/mod.rs"]
 mod vdr_support;
@@ -40,7 +40,11 @@ fn vdr_late_interaction_ranks_with_multivector_maxsim() {
     );
 
     // When: sync stores multi-vectors and a multi-token query searches.
-    let synced = assert_success(run(&config, &["vdr", "sync"], server.url()));
+    let synced = assert_success(run(
+        &config,
+        &["vdr", "sync", "--dimensions", "4"],
+        server.url(),
+    ));
     assert!(
         synced.contains("indexed 4"),
         "expected paired vectors, got: {synced}"
@@ -117,7 +121,11 @@ fn vdr_embedding_search_matches_image_or_caption_embeddings() {
     );
 
     // When: VDR sync indexes both image and caption vectors, then embedding search queries dog.
-    let synced = assert_success(run(&config, &["vdr", "sync"], server.url()));
+    let synced = assert_success(run(
+        &config,
+        &["vdr", "sync", "--dimensions", "4"],
+        server.url(),
+    ));
     assert!(
         synced.contains("indexed 4"),
         "expected paired vectors, got: {synced}"
@@ -184,7 +192,11 @@ fn vdr_sync_prunes_deleted_and_indexes_added_images() {
         "Old Dog",
         "puppy should disappear",
     );
-    assert_success(run(&config, &["vdr", "sync"], server.url()));
+    assert_success(run(
+        &config,
+        &["vdr", "sync", "--dimensions", "4"],
+        server.url(),
+    ));
 
     fs::remove_file(&old).expect("delete old image");
     fs::write(images.join("new.png"), b"new fresh image").expect("write new image");
@@ -199,7 +211,11 @@ fn vdr_sync_prunes_deleted_and_indexes_added_images() {
     );
 
     // When: the incremental sync runs with pruning.
-    let synced = assert_success(run(&config, &["vdr", "sync", "--prune"], server.url()));
+    let synced = assert_success(run(
+        &config,
+        &["vdr", "sync", "--prune", "--dimensions", "4"],
+        server.url(),
+    ));
     let status = assert_success(run(&config, &["vdr", "status", "--json"], server.url()));
     let search = assert_success(run(
         &config,
@@ -248,11 +264,19 @@ fn vdr_sync_second_run_skips_already_indexed_images() {
     let (dog_id, dog_path) = image_id_for(&config, "dog.png");
     write_caption(&config, &dog_id, &dog_path, "Dog", "puppy");
 
-    assert_success(run(&config, &["vdr", "sync"], server.url()));
+    assert_success(run(
+        &config,
+        &["vdr", "sync", "--dimensions", "4"],
+        server.url(),
+    ));
     let requests_after_first_sync = server.request_count();
 
     // When: sync runs again with unchanged sha/model/dimensions.
-    let synced = assert_success(run(&config, &["vdr", "sync"], server.url()));
+    let synced = assert_success(run(
+        &config,
+        &["vdr", "sync", "--dimensions", "4"],
+        server.url(),
+    ));
 
     // Then: no new vectors are written and no extra embedding request is needed.
     assert!(
@@ -260,6 +284,127 @@ fn vdr_sync_second_run_skips_already_indexed_images() {
         "second sync should skip, got: {synced}"
     );
     assert_eq!(server.request_count(), requests_after_first_sync);
+}
+
+#[test]
+fn vdr_sync_fails_when_server_returns_different_model() {
+    // Given: a server that reports a different model than the sync request.
+    let server = FakeEmbeddingServer::start_with_response_model("different-model");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).expect("create images");
+    fs::write(images.join("dog.png"), b"dog image bytes").expect("write dog image");
+    assert_success(run(&config, &["init"], server.url()));
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", images.to_str().expect("utf8")],
+        server.url(),
+    ));
+
+    // When: sync requests the normal test model/dimensions.
+    let output = run(
+        &config,
+        &[
+            "vdr",
+            "sync",
+            "--model",
+            "requested-model",
+            "--dimensions",
+            "4",
+        ],
+        server.url(),
+    );
+
+    // Then: the mismatch is rejected before any misleading metadata is stored.
+    assert!(
+        !output.status.success(),
+        "sync should fail on model mismatch"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "embedding server returned model different-model but requested-model was requested"
+        ),
+        "expected model mismatch, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("pass --model/--dimensions matching the running server"),
+        "expected remediation hint, got: {stderr}"
+    );
+}
+
+#[test]
+fn vdr_sync_updates_vector_path_after_image_record_path_changes() {
+    // Given: an indexed image whose latest image record keeps the id/sha but changes path.
+    let server = FakeEmbeddingServer::start();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).expect("create images");
+    let new_path = images.join("renamed-dog.png");
+    fs::write(images.join("dog.png"), b"dog image bytes").expect("write dog image");
+    assert_success(run(&config, &["init"], server.url()));
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", images.to_str().expect("utf8")],
+        server.url(),
+    ));
+    let (dog_id, dog_path) = image_id_for(&config, "dog.png");
+    write_caption(&config, &dog_id, &dog_path, "Dog", "puppy");
+    assert_success(run(
+        &config,
+        &["vdr", "sync", "--model", "test-model", "--dimensions", "4"],
+        server.url(),
+    ));
+    let requests_after_first_sync = server.request_count();
+
+    let raw_images = fs::read_to_string(config.join("images.jsonl")).expect("images jsonl");
+    let mut renamed_record: serde_json::Value = raw_images
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("image record"))
+        .find(|record: &serde_json::Value| record["id"] == dog_id)
+        .expect("dog record");
+    renamed_record["path"] = serde_json::Value::String(new_path.to_string_lossy().to_string());
+    let mut images_jsonl = fs::OpenOptions::new()
+        .append(true)
+        .open(config.join("images.jsonl"))
+        .expect("open images jsonl");
+    writeln!(images_jsonl, "{renamed_record}").expect("append renamed image record");
+    write_caption(&config, &dog_id, &new_path, "Dog", "puppy");
+
+    // When: sync sees the same id/sha/content under a different latest path.
+    let synced = assert_success(run(
+        &config,
+        &["vdr", "sync", "--model", "test-model", "--dimensions", "4"],
+        server.url(),
+    ));
+    let search = assert_success(run(
+        &config,
+        &["search", "--mode", "embedding", "dog", "--json"],
+        server.url(),
+    ));
+
+    // Then: no re-embedding is needed, but search reports the current image path.
+    assert!(
+        synced.contains("indexed 0"),
+        "path-only update should not re-index, got: {synced}"
+    );
+    assert_eq!(server.request_count(), requests_after_first_sync + 1);
+    assert!(
+        search.contains("renamed-dog.png"),
+        "embedding search should return latest path, got: {search}"
+    );
+    let rows: Vec<serde_json::Value> = search
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("json result"))
+        .collect();
+    assert!(
+        rows.iter()
+            .all(|row| !row["path"].as_str().expect("path").ends_with("/dog.png")),
+        "embedding search should not return stale path, got: {search}"
+    );
 }
 
 #[test]
@@ -280,12 +425,20 @@ fn vdr_sync_reindexes_when_file_sha_changes() {
     ));
     let (dog_id, dog_path) = image_id_for(&config, "dog.png");
     write_caption(&config, &dog_id, &dog_path, "Dog", "puppy");
-    assert_success(run(&config, &["vdr", "sync"], server.url()));
+    assert_success(run(
+        &config,
+        &["vdr", "sync", "--dimensions", "4"],
+        server.url(),
+    ));
 
     fs::write(&image, b"dog image bytes changed").expect("modify image bytes");
 
     // When: VDR sync runs again without a path change.
-    let synced = assert_success(run(&config, &["vdr", "sync"], server.url()));
+    let synced = assert_success(run(
+        &config,
+        &["vdr", "sync", "--dimensions", "4"],
+        server.url(),
+    ));
 
     // Then: image and caption vectors are refreshed for the new file sha.
     assert!(
@@ -311,7 +464,11 @@ fn vdr_sync_reindexes_when_caption_changes() {
     ));
     let (dog_id, dog_path) = image_id_for(&config, "dog.png");
     write_caption(&config, &dog_id, &dog_path, "Dog", "puppy");
-    assert_success(run(&config, &["vdr", "sync"], server.url()));
+    assert_success(run(
+        &config,
+        &["vdr", "sync", "--dimensions", "4"],
+        server.url(),
+    ));
     write_caption(
         &config,
         &dog_id,
@@ -321,7 +478,11 @@ fn vdr_sync_reindexes_when_caption_changes() {
     );
 
     // When: only the caption content changes.
-    let synced = assert_success(run(&config, &["vdr", "sync"], server.url()));
+    let synced = assert_success(run(
+        &config,
+        &["vdr", "sync", "--dimensions", "4"],
+        server.url(),
+    ));
     let search = assert_success(run(
         &config,
         &["search", "--mode", "embedding", "new", "--json"],

@@ -14,8 +14,9 @@ use std::{
     env,
     ffi::OsStr,
     fs::{self, File, OpenOptions},
-    io::{BufRead, BufReader, Write},
+    io::{self, BufRead, BufReader, Write},
     path::{Path, PathBuf},
+    process::ExitCode,
     thread,
     time::Duration,
 };
@@ -391,7 +392,15 @@ fn build_provider(
     }
 }
 
-fn main() -> Result<()> {
+fn main() -> ExitCode {
+    if let Err(err) = run() {
+        eprintln!("Error: {}", mask_api_keys(&format!("{err:#}")));
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}
+
+fn run() -> Result<()> {
     let cli = Cli::parse();
     let paths = AppPaths::resolve()?;
     match cli.command {
@@ -716,16 +725,7 @@ fn cmd_rename(paths: &AppPaths, args: RenameArgs) -> Result<()> {
             created_at: Utc::now(),
         };
         if args.apply {
-            if target.exists() {
-                log_error(
-                    paths,
-                    "rename",
-                    anyhow!("refusing to overwrite existing file {}", target.display()),
-                );
-                failed += 1;
-                continue;
-            }
-            if let Err(err) = fs::rename(&image.path, &target).with_context(|| {
+            if let Err(err) = rename_no_clobber(&image.path, &target).with_context(|| {
                 format!(
                     "failed to rename {} to {}",
                     image.path.display(),
@@ -737,6 +737,10 @@ fn cmd_rename(paths: &AppPaths, args: RenameArgs) -> Result<()> {
                 continue;
             }
             if let Err(err) = append_jsonl(&paths.renames, &record) {
+                eprintln!(
+                    "warning: renamed on disk but state update failed for {}; run bootstrap to reconcile",
+                    target.display()
+                );
                 log_error(paths, "rename", err);
                 failed += 1;
                 continue;
@@ -744,6 +748,10 @@ fn cmd_rename(paths: &AppPaths, args: RenameArgs) -> Result<()> {
             let mut updated = image.clone();
             updated.path = fs::canonicalize(&target).unwrap_or(target.clone());
             if let Err(err) = append_jsonl(&paths.images, &updated) {
+                eprintln!(
+                    "warning: renamed on disk but state update failed for {}; run bootstrap to reconcile",
+                    target.display()
+                );
                 log_error(paths, "rename", err);
                 failed += 1;
                 continue;
@@ -767,6 +775,26 @@ fn cmd_rename(paths: &AppPaths, args: RenameArgs) -> Result<()> {
         println!("(would skip {skipped} meaningful-looking name(s); use --force to override)");
     }
     Ok(())
+}
+
+fn rename_no_clobber(source: &Path, target: &Path) -> io::Result<()> {
+    match fs::hard_link(source, target) {
+        Ok(()) => fs::remove_file(source),
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("refusing to overwrite existing file {}", target.display()),
+        )),
+        Err(err) if err.kind() == io::ErrorKind::CrossesDevices => {
+            if target.exists() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("refusing to overwrite existing file {}", target.display()),
+                ));
+            }
+            fs::rename(source, target)
+        }
+        Err(err) => Err(err),
+    }
 }
 
 fn deactivate_image_record(paths: &AppPaths, image: &ImageRecord) -> Result<()> {
@@ -1346,7 +1374,16 @@ fn active_folders(paths: &AppPaths) -> Result<Vec<FolderRecord>> {
 }
 
 pub(crate) fn latest_images(paths: &AppPaths) -> Result<Vec<ImageRecord>> {
-    Ok(latest_images_by_path(paths)?.into_values().collect())
+    let mut sequence: HashMap<PathBuf, usize> = HashMap::new();
+    for (index, image) in read_jsonl::<ImageRecord>(&paths.images)?
+        .into_iter()
+        .enumerate()
+    {
+        sequence.insert(image.path.clone(), index);
+    }
+    let mut images: Vec<ImageRecord> = latest_images_by_path(paths)?.into_values().collect();
+    images.sort_by_key(|image| sequence[&image.path]);
+    Ok(images)
 }
 
 pub(crate) fn latest_images_refreshing_changed_files(

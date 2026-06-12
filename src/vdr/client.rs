@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::env;
@@ -22,6 +22,7 @@ pub(super) struct EmbedResponse {
 struct RawEmbedResponse {
     model: String,
     embeddings: Vec<Value>,
+    dimensions: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -50,18 +51,57 @@ pub(super) fn embed(
         dimensions,
         inputs,
     };
-    let response: Value = reqwest::blocking::Client::new()
+    let client = reqwest::blocking::Client::new();
+    let response = client
         .post(&endpoint)
         .json(&request)
         .send()
-        .with_context(|| format!("failed to connect to VDR embedding server at {url}"))?
+        .map_err(|err| {
+            anyhow!(
+                "failed to connect to VDR embedding server at {}: {}",
+                redact_url(url),
+                redact_message(&err.to_string())
+            )
+        })?
         .error_for_status()
-        .with_context(|| format!("VDR embedding server returned an error at {url}"))?
-        .json()?;
+        .map_err(|err| {
+            anyhow!(
+                "VDR embedding server returned an error at {}: {}",
+                redact_url(url),
+                redact_message(&err.to_string())
+            )
+        })?;
+    let response: Value = response.json()?;
     let raw: RawEmbedResponse = serde_json::from_value(response)?;
+    if raw.model != model {
+        bail!(
+            "embedding server returned model {} but {} was requested; pass --model/--dimensions matching the running server",
+            raw.model,
+            model
+        );
+    }
+    if let Some(response_dimensions) = raw.dimensions
+        && response_dimensions != dimensions
+    {
+        bail!(
+            "embedding server returned dimensions {} but {} was requested; pass --model/--dimensions matching the running server",
+            response_dimensions,
+            dimensions
+        );
+    }
     let mut embeddings = Vec::with_capacity(raw.embeddings.len());
     for value in raw.embeddings {
-        embeddings.push(parse_multivector(value)?);
+        let multivector = parse_multivector(value)?;
+        for row in &multivector {
+            if row.len() != dimensions {
+                bail!(
+                    "embedding server returned vector row with dimensions {} but {} was requested; pass --model/--dimensions matching the running server",
+                    row.len(),
+                    dimensions
+                );
+            }
+        }
+        embeddings.push(multivector);
     }
     Ok(EmbedResponse {
         model: raw.model,
@@ -89,6 +129,44 @@ fn parse_multivector(value: Value) -> Result<Vec<Vec<f32>>> {
             Ok(vec![row])
         }
     }
+}
+
+fn redact_url(url: &str) -> String {
+    let (without_query, had_query) = url
+        .split_once('?')
+        .map_or((url, false), |(base, _)| (base, true));
+    let mut redacted = without_query.to_string();
+    if let Some(scheme_end) = redacted.find("://") {
+        let authority_start = scheme_end + 3;
+        if let Some(authority_end) = redacted[authority_start..].find('/') {
+            redact_userinfo(
+                &mut redacted,
+                authority_start,
+                authority_start + authority_end,
+            );
+        } else {
+            let authority_end = redacted.len();
+            redact_userinfo(&mut redacted, authority_start, authority_end);
+        }
+    }
+    if had_query {
+        redacted.push_str("?…");
+    }
+    redacted
+}
+
+fn redact_userinfo(url: &mut String, authority_start: usize, authority_end: usize) {
+    if let Some(at_offset) = url[authority_start..authority_end].rfind('@') {
+        url.replace_range(authority_start..authority_start + at_offset, "***");
+    }
+}
+
+fn redact_message(message: &str) -> String {
+    message
+        .split_whitespace()
+        .map(redact_url)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub(super) fn query_input(query: &str) -> EmbedInput {

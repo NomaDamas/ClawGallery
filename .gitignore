@@ -9,3 +9,6 @@
 .omx/context/
 .omx/plans/
 .sisyphus/
+.gjc/
+.omo/
+__pycache__/
