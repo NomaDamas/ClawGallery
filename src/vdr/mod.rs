@@ -6,6 +6,7 @@ use std::path::PathBuf;
 mod client;
 mod index;
 mod search;
+mod serve;
 mod store;
 
 pub(crate) use search::cmd_embedding_search;
@@ -13,6 +14,8 @@ pub(crate) use search::cmd_embedding_search;
 const DEFAULT_EMBEDDING_URL: &str = "http://127.0.0.1:8765";
 const DEFAULT_VDR_MODEL: &str = "vidore/colqwen2-v1.0";
 const DEFAULT_DIMENSIONS: usize = 128;
+const DEFAULT_MLX_MODEL: &str = "qnguyen3/colqwen2.5-v0.2-mlx";
+const DEFAULT_MLX_DIMENSIONS: usize = 128;
 
 #[derive(Debug, Args)]
 pub(crate) struct VdrArgs {
@@ -24,6 +27,7 @@ pub(crate) struct VdrArgs {
 enum VdrCommand {
     Sync(VdrSyncArgs),
     Status(VdrStatusArgs),
+    Serve(VdrServeArgs),
 }
 
 #[derive(Debug, Args)]
@@ -42,6 +46,26 @@ struct VdrSyncArgs {
 struct VdrStatusArgs {
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Args)]
+struct VdrServeArgs {
+    #[arg(long, value_enum, default_value_t = serve::ServeBackend::Mlx)]
+    backend: serve::ServeBackend,
+    #[arg(long, default_value = "127.0.0.1")]
+    host: String,
+    #[arg(long, default_value_t = 8765)]
+    port: u16,
+    #[arg(long, default_value = DEFAULT_MLX_MODEL)]
+    model: String,
+    #[arg(long, default_value_t = DEFAULT_MLX_DIMENSIONS)]
+    dimensions: usize,
+    #[arg(long, default_value = "auto")]
+    device: String,
+    #[arg(long)]
+    python: Option<PathBuf>,
+    #[arg(long)]
+    allow_remote: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,7 +105,21 @@ pub(crate) fn cmd_vdr(paths: &AppPaths, args: VdrArgs) -> Result<()> {
     match args.command {
         VdrCommand::Sync(args) => cmd_sync(paths, args),
         VdrCommand::Status(args) => cmd_status(paths, args),
+        VdrCommand::Serve(args) => cmd_serve(args),
     }
+}
+
+fn cmd_serve(args: VdrServeArgs) -> Result<()> {
+    serve::serve(serve::ServeArgs {
+        backend: args.backend,
+        host: args.host,
+        port: args.port,
+        model: args.model,
+        dimensions: args.dimensions,
+        device: args.device,
+        python: args.python,
+        allow_remote: args.allow_remote,
+    })
 }
 
 fn cmd_sync(paths: &AppPaths, args: VdrSyncArgs) -> Result<()> {

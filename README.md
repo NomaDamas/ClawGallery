@@ -20,7 +20,20 @@ clawgallery caption --dry-run
 clawgallery rename --dry-run
 ```
 
-Semantic image search through local VDR (default: `vidore/colqwen2-v1.0`, dimensions `128`):
+Semantic image search through local VDR with the packaged MLX daemon on macOS:
+
+```bash
+brew install rust uv
+cargo install --path .
+uv tool install mlx-embeddings --with pillow --with torch --with torchvision
+CLAWGALLERY_PYTHON="$(uv tool dir)/mlx-embeddings/bin/python" clawgallery vdr serve --backend mlx
+clawgallery vdr sync --model qnguyen3/colqwen2.5-v0.2-mlx --dimensions 128
+clawgallery search --mode embedding "login error" --json
+```
+
+The MLX path uses `mlx-embeddings` with the late-interaction ColQwen2.5 model `qnguyen3/colqwen2.5-v0.2-mlx`. `clawgallery vdr serve --backend mlx` launches ClawGallery's packaged Python `/embed` daemon, so an installed Rust binary does not need the repository's `scripts/` directory at runtime. The daemon binds to `127.0.0.1` by default and refuses non-loopback hosts unless `--allow-remote` is passed.
+
+Legacy ColQwen2 server path (default VDR model: `vidore/colqwen2-v1.0`, dimensions `128`):
 
 ```bash
 uv pip install colpali-engine torch pillow
@@ -110,6 +123,7 @@ clawgallery caption [--missing] [--file <path>] [--dry-run] [--model <model>] [-
 clawgallery rename [--apply] [--dry-run] [--file <path>] [--style title|caption|date-title] [--force]
 clawgallery search [--mode keyword|embedding] <query...> [--limit <n>] [--json] [--case-sensitive] [--no-fuzzy] [--embedding-url <url>]
 clawgallery vdr sync [--prune] [--embedding-url <url>] [--model <model>] [--dimensions <n>]
+clawgallery vdr serve [--backend mlx] [--host <host>] [--port <port>] [--model <model>] [--dimensions <n>] [--device auto|mps|cpu] [--python <path>] [--allow-remote]
 clawgallery vdr status [--json]
 clawgallery status
 clawgallery skill path|print
@@ -146,7 +160,15 @@ POST /embed
 {"model":"vidore/colqwen2-v1.0","dimensions":128,"inputs":[{"kind":"image|text|caption","role":"document|query","value":"path or text"}]}
 ```
 
-The bundled default local server uses `vidore/colqwen2-v1.0` with 128-dimensional ColQwen2 embeddings:
+The packaged macOS-optimized server uses `mlx-embeddings` with `qnguyen3/colqwen2.5-v0.2-mlx` and 128-dimensional late-interaction ColQwen2.5 embeddings:
+
+```bash
+uv tool install mlx-embeddings --with pillow --with torch --with torchvision
+CLAWGALLERY_PYTHON="$(uv tool dir)/mlx-embeddings/bin/python" \
+  clawgallery vdr serve --backend mlx --host 127.0.0.1 --port 8765
+```
+
+The legacy local server uses `vidore/colqwen2-v1.0` with 128-dimensional ColQwen2 embeddings:
 
 ```bash
 python scripts/colqwen2_server.py --host 127.0.0.1 --port 8765 --device auto
