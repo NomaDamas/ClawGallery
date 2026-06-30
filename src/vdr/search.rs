@@ -132,7 +132,7 @@ fn print_hit(hit: EmbeddingSearchHit, query: &str, json_output: bool) -> Result<
 /// the maximum cosine similarity over all document vectors, then average over
 /// query tokens. With single-vector inputs (1x1) this degenerates to plain
 /// cosine similarity, so legacy single-vector indexes keep working.
-fn late_interaction_score(query: &[Vec<f32>], document: &[Vec<f32>]) -> Result<f64> {
+pub(super) fn late_interaction_score(query: &[Vec<f32>], document: &[Vec<f32>]) -> Result<f64> {
     if query.is_empty() || document.is_empty() {
         return Ok(0.0);
     }

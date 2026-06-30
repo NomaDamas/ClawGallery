@@ -308,6 +308,62 @@ fn forget_deactivates_vdr_vectors_for_image() {
 }
 
 #[test]
+fn dedup_similar_reports_vdr_image_vector_groups_jsonl() {
+    let server = FakeEmbeddingServer::start();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).expect("create images");
+    fs::write(images.join("dog-a.png"), b"dog image one").expect("write dog a");
+    fs::write(images.join("dog-b.png"), b"dog image two").expect("write dog b");
+    fs::write(images.join("cat.png"), b"cat image").expect("write cat");
+
+    assert_success(run(&config, &["init"], server.url()));
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", images.to_str().expect("utf8")],
+        server.url(),
+    ));
+    assert_success(run(
+        &config,
+        &["vdr", "sync", "--dimensions", "4"],
+        server.url(),
+    ));
+
+    let stdout = assert_success(run(
+        &config,
+        &["dedup", "--similar", "--threshold", "0.99", "--json"],
+        server.url(),
+    ));
+    let rows: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("json group"))
+        .collect();
+
+    assert_eq!(rows.len(), 1, "expected one similar group, got: {stdout}");
+    assert_eq!(rows[0]["kind"], "similar");
+    assert!(
+        rows[0]["representative"]["path"]
+            .as_str()
+            .expect("path")
+            .ends_with("dog-a.png")
+    );
+    let duplicates = rows[0]["duplicates"].as_array().expect("duplicates");
+    assert_eq!(duplicates.len(), 1);
+    assert!(
+        duplicates[0]["path"]
+            .as_str()
+            .expect("path")
+            .ends_with("dog-b.png")
+    );
+    assert_eq!(duplicates[0]["score"], 1.0);
+    assert!(
+        !stdout.contains("cat.png"),
+        "cat image must not be in dog duplicate group, got: {stdout}"
+    );
+}
+
+#[test]
 fn vdr_sync_second_run_skips_already_indexed_images() {
     // Given: one image has already been synced.
     let server = FakeEmbeddingServer::start();

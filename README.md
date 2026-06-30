@@ -129,6 +129,7 @@ clawgallery poll [--folder <id>] [--path <path>] [--once] [--interval <seconds>]
 clawgallery caption [--missing] [--file <path>] [--dry-run] [--model <model>] [--provider <provider>] [--concurrency <n>] [--max-retries <n>]
 clawgallery rename [--apply] [--dry-run] [--file <path>] [--style title|caption|date-title] [--force]
 clawgallery forget --file <path> [--delete]
+clawgallery dedup [--exact] [--similar] [--threshold <0..1>] [--json]
 clawgallery search [--mode keyword|embedding] <query...> [--limit <n>] [--json] [--case-sensitive] [--no-fuzzy] [--embedding-url <url>]
 clawgallery vdr sync [--prune] [--embedding-url <url>] [--model <model>] [--dimensions <n>] [--max-retries <n>]
 clawgallery vdr serve [--backend mlx] [--host <host>] [--port <port>] [--model <model>] [--dimensions <n>] [--device auto|mps|cpu] [--python <path>] [--allow-remote]
@@ -136,6 +137,10 @@ clawgallery vdr status [--json]
 clawgallery status
 clawgallery skill path|print
 ```
+
+## Dedup
+
+`clawgallery dedup` reports duplicate candidates without deleting anything. With no mode flag it runs `--exact`, grouping active images that share the same `sha256`. Pass `--similar` to group active images whose VDR image embeddings meet `--threshold` (default `0.95`); run `clawgallery vdr sync` first so the local VDR index exists. `--json` emits one JSON object per group with a representative image and duplicate candidates including scores.
 
 ## Search syntax
 

@@ -842,6 +842,69 @@ fn forget_missing_path_reports_clear_error() {
     assert!(stderr.contains("missing.png"));
 }
 
+#[test]
+fn dedup_exact_groups_active_images_by_sha_jsonl() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).unwrap();
+    fs::write(images.join("copy-a.png"), b"same bytes").unwrap();
+    fs::write(images.join("copy-b.png"), b"same bytes").unwrap();
+    fs::write(images.join("unique.png"), b"different").unwrap();
+
+    assert_success(run(&config, &["init"]));
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", images.to_str().unwrap()],
+    ));
+
+    let stdout = assert_success(run(&config, &["dedup", "--exact", "--json"]));
+    let rows: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+
+    assert_eq!(rows.len(), 1, "expected one duplicate group, got: {stdout}");
+    assert_eq!(rows[0]["kind"], "exact");
+    assert!(
+        rows[0]["representative"]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("copy-a.png")
+    );
+    let duplicates = rows[0]["duplicates"].as_array().unwrap();
+    assert_eq!(duplicates.len(), 1);
+    assert!(
+        duplicates[0]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("copy-b.png")
+    );
+    assert!(
+        !stdout.contains("unique.png"),
+        "unique image must not be reported, got: {stdout}"
+    );
+}
+
+#[test]
+fn dedup_exact_reports_no_groups_cleanly() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).unwrap();
+    fs::write(images.join("one.png"), b"one").unwrap();
+    fs::write(images.join("two.png"), b"two").unwrap();
+
+    assert_success(run(&config, &["init"]));
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", images.to_str().unwrap()],
+    ));
+
+    let stdout = assert_success(run(&config, &["dedup", "--exact"]));
+    assert_eq!(stdout.trim(), "no duplicate groups found");
+}
+
 fn inject_caption(
     config: &Path,
     image_path: &Path,

@@ -60,6 +60,7 @@ enum Command {
     /// Safely rename images from generated titles/captions.
     Rename(RenameArgs),
     Forget(ForgetArgs),
+    Dedup(DedupArgs),
     /// Search local JSONL metadata by keyword.
     Search(SearchArgs),
     /// Manage local visual document retrieval embeddings.
@@ -188,6 +189,40 @@ struct ForgetArgs {
     file: PathBuf,
     #[arg(long)]
     delete: bool,
+}
+
+#[derive(Debug, Args)]
+struct DedupArgs {
+    #[arg(long)]
+    exact: bool,
+    #[arg(long)]
+    similar: bool,
+    #[arg(long, default_value_t = 0.95)]
+    threshold: f64,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct DedupImageOutput {
+    image_id: String,
+    path: PathBuf,
+    sha256: String,
+}
+
+#[derive(Debug, Serialize)]
+struct DedupDuplicateOutput {
+    image_id: String,
+    path: PathBuf,
+    sha256: String,
+    score: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct DedupGroupOutput {
+    kind: &'static str,
+    representative: DedupImageOutput,
+    duplicates: Vec<DedupDuplicateOutput>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -468,6 +503,7 @@ fn run() -> Result<()> {
         Command::Caption(args) => cmd_caption(&paths, args),
         Command::Rename(args) => cmd_rename(&paths, args),
         Command::Forget(args) => cmd_forget(&paths, args),
+        Command::Dedup(args) => cmd_dedup(&paths, args),
         Command::Search(args) => cmd_search(&paths, args),
         Command::Vdr(args) => vdr::cmd_vdr(&paths, args),
         Command::Status => cmd_status(&paths),
@@ -935,6 +971,133 @@ fn cmd_forget(paths: &AppPaths, args: ForgetArgs) -> Result<()> {
         println!("forgot 1 image (deleted) {}", image.path.display());
     } else {
         println!("forgot 1 image {}", image.path.display());
+    }
+    Ok(())
+}
+
+fn cmd_dedup(paths: &AppPaths, args: DedupArgs) -> Result<()> {
+    paths.ensure()?;
+    if !(0.0..=1.0).contains(&args.threshold) {
+        bail!("--threshold must be between 0 and 1");
+    }
+    let mut use_exact = args.exact;
+    let use_similar = args.similar;
+    if !use_exact && !use_similar {
+        use_exact = true;
+    }
+    let images = latest_images(paths)?;
+    let mut groups = Vec::new();
+    if use_exact {
+        groups.extend(exact_dedup_groups(&images));
+    }
+    if use_similar {
+        groups.extend(similar_dedup_groups(paths, &images, args.threshold)?);
+    }
+    groups.sort_by(|left, right| {
+        left.representative
+            .path
+            .cmp(&right.representative.path)
+            .then_with(|| left.kind.cmp(right.kind))
+    });
+    if groups.is_empty() {
+        if !args.json {
+            println!("no duplicate groups found");
+        }
+        return Ok(());
+    }
+    for group in groups {
+        print_dedup_group(&group, args.json)?;
+    }
+    Ok(())
+}
+
+fn exact_dedup_groups(images: &[ImageRecord]) -> Vec<DedupGroupOutput> {
+    let mut by_sha: HashMap<&str, Vec<&ImageRecord>> = HashMap::new();
+    for image in images {
+        by_sha.entry(&image.sha256).or_default().push(image);
+    }
+    let mut groups = Vec::new();
+    for images in by_sha.values_mut() {
+        if images.len() < 2 {
+            continue;
+        }
+        images.sort_by(|left, right| left.path.cmp(&right.path));
+        let representative = dedup_image_output(images[0]);
+        let duplicates = images[1..]
+            .iter()
+            .map(|image| dedup_duplicate_output(image, 1.0))
+            .collect();
+        groups.push(DedupGroupOutput {
+            kind: "exact",
+            representative,
+            duplicates,
+        });
+    }
+    groups
+}
+
+fn similar_dedup_groups(
+    paths: &AppPaths,
+    images: &[ImageRecord],
+    threshold: f64,
+) -> Result<Vec<DedupGroupOutput>> {
+    let images_by_id: HashMap<&str, &ImageRecord> = images
+        .iter()
+        .map(|image| (image.id.as_str(), image))
+        .collect();
+    let mut groups = Vec::new();
+    for group in vdr::similar_image_groups(paths, images, threshold)? {
+        let Some(representative) = images_by_id.get(group.representative_id.as_str()) else {
+            continue;
+        };
+        let mut duplicates = Vec::new();
+        for duplicate in group.duplicates {
+            let Some(image) = images_by_id.get(duplicate.image_id.as_str()) else {
+                continue;
+            };
+            duplicates.push(dedup_duplicate_output(image, duplicate.score));
+        }
+        if duplicates.is_empty() {
+            continue;
+        }
+        groups.push(DedupGroupOutput {
+            kind: "similar",
+            representative: dedup_image_output(representative),
+            duplicates,
+        });
+    }
+    Ok(groups)
+}
+
+fn dedup_image_output(image: &ImageRecord) -> DedupImageOutput {
+    DedupImageOutput {
+        image_id: image.id.clone(),
+        path: image.path.clone(),
+        sha256: image.sha256.clone(),
+    }
+}
+
+fn dedup_duplicate_output(image: &ImageRecord, score: f64) -> DedupDuplicateOutput {
+    DedupDuplicateOutput {
+        image_id: image.id.clone(),
+        path: image.path.clone(),
+        sha256: image.sha256.clone(),
+        score,
+    }
+}
+
+fn print_dedup_group(group: &DedupGroupOutput, json_output: bool) -> Result<()> {
+    if json_output {
+        println!("{}", serde_json::to_string(group)?);
+        return Ok(());
+    }
+    println!(
+        "{} duplicate group: {}",
+        group.kind,
+        group.representative.path.display()
+    );
+    for duplicate in &group.duplicates {
+        println!("  {:.4} {}", duplicate.score, duplicate.path.display());
     }
     Ok(())
 }

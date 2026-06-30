@@ -1,7 +1,7 @@
-use crate::AppPaths;
+use crate::{AppPaths, ImageRecord};
 use anyhow::Result;
 use clap::{Args, Subcommand};
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 
 mod client;
 mod index;
@@ -103,6 +103,18 @@ struct PendingEmbedding {
     value: String,
 }
 
+#[derive(Debug)]
+pub(crate) struct SimilarImageDuplicate {
+    pub(crate) image_id: String,
+    pub(crate) score: f64,
+}
+
+#[derive(Debug)]
+pub(crate) struct SimilarImageGroup {
+    pub(crate) representative_id: String,
+    pub(crate) duplicates: Vec<SimilarImageDuplicate>,
+}
+
 pub(crate) fn cmd_vdr(paths: &AppPaths, args: VdrArgs) -> Result<()> {
     paths.ensure()?;
     match args.command {
@@ -118,6 +130,122 @@ pub(crate) fn deactivate_image_vectors(paths: &AppPaths, image_id: &str) -> Resu
     }
     let conn = store::open_store(paths)?;
     store::deactivate_image_vectors(&conn, image_id)
+}
+
+pub(crate) fn similar_image_groups(
+    paths: &AppPaths,
+    images: &[ImageRecord],
+    threshold: f64,
+) -> Result<Vec<SimilarImageGroup>> {
+    let conn = store::open_store(paths)?;
+    let index_config =
+        index::latest_active_index_config(&conn)?.unwrap_or_else(|| index::ActiveIndexConfig {
+            model: client::default_model().to_string(),
+            dimensions: DEFAULT_DIMENSIONS,
+        });
+    let active_images: HashMap<String, ImageRecord> = images
+        .iter()
+        .map(|image| (image.id.clone(), image.clone()))
+        .collect();
+    let mut vectors: Vec<_> = store::active_vectors(
+        &conn,
+        &active_images,
+        &index_config.model,
+        index_config.dimensions,
+    )?
+    .into_iter()
+    .filter(|stored| stored.kind == EmbeddingKind::Image)
+    .collect();
+    vectors.sort_by(|left, right| {
+        active_images[&left.image_id]
+            .path
+            .cmp(&active_images[&right.image_id].path)
+    });
+    let mut parents: Vec<usize> = (0..vectors.len()).collect();
+    let mut scores: HashMap<(usize, usize), f64> = HashMap::new();
+    for left in 0..vectors.len() {
+        for right in (left + 1)..vectors.len() {
+            let forward =
+                search::late_interaction_score(&vectors[left].vectors, &vectors[right].vectors)?;
+            let backward =
+                search::late_interaction_score(&vectors[right].vectors, &vectors[left].vectors)?;
+            let score = (forward + backward) / 2.0;
+            if score >= threshold {
+                union(&mut parents, left, right);
+                scores.insert((left, right), score);
+            }
+        }
+    }
+    let mut components: HashMap<usize, Vec<usize>> = HashMap::new();
+    for index in 0..vectors.len() {
+        components
+            .entry(find(&mut parents, index))
+            .or_default()
+            .push(index);
+    }
+    let mut groups = Vec::new();
+    for component in components.values_mut() {
+        if component.len() < 2 {
+            continue;
+        }
+        component.sort_by(|left, right| {
+            active_images[&vectors[*left].image_id]
+                .path
+                .cmp(&active_images[&vectors[*right].image_id].path)
+        });
+        let representative = component[0];
+        let duplicates = component[1..]
+            .iter()
+            .map(|index| SimilarImageDuplicate {
+                image_id: vectors[*index].image_id.clone(),
+                score: best_component_score(*index, component, &scores),
+            })
+            .collect();
+        groups.push(SimilarImageGroup {
+            representative_id: vectors[representative].image_id.clone(),
+            duplicates,
+        });
+    }
+    groups.sort_by(|left, right| {
+        active_images[&left.representative_id]
+            .path
+            .cmp(&active_images[&right.representative_id].path)
+    });
+    Ok(groups)
+}
+
+fn best_component_score(
+    target: usize,
+    component: &[usize],
+    scores: &HashMap<(usize, usize), f64>,
+) -> f64 {
+    component
+        .iter()
+        .filter(|index| **index != target)
+        .filter_map(|index| {
+            let key = if *index < target {
+                (*index, target)
+            } else {
+                (target, *index)
+            };
+            scores.get(&key).copied()
+        })
+        .fold(0.0, f64::max)
+}
+
+fn union(parents: &mut [usize], left: usize, right: usize) {
+    let left_root = find(parents, left);
+    let right_root = find(parents, right);
+    if left_root != right_root {
+        parents[right_root] = left_root;
+    }
+}
+
+fn find(parents: &mut [usize], index: usize) -> usize {
+    if parents[index] != index {
+        parents[index] = find(parents, parents[index]);
+    }
+    parents[index]
 }
 
 fn cmd_serve(args: VdrServeArgs) -> Result<()> {
