@@ -56,7 +56,13 @@ Continuous polling:
 
 ```bash
 clawgallery poll --interval 30
+clawgallery poll --interval 30 --caption --sync
 ```
+
+`--caption` runs missing-caption generation after each ingest pass. `--sync`
+then runs `vdr sync`, so `poll --once --caption --sync` performs one
+bootstrap -> caption -> VDR sync cycle. Caption or VDR failures are written to
+`errors.jsonl` and reported without stopping the poll loop.
 
 ## State files
 
@@ -118,7 +124,7 @@ clawgallery folder add <path> [--recursive]
 clawgallery folder remove <id-or-path>
 clawgallery folder list
 clawgallery bootstrap [--folder <id>] [--path <path>] [--prune]
-clawgallery poll [--folder <id>] [--path <path>] [--once] [--interval <seconds>] [--prune]
+clawgallery poll [--folder <id>] [--path <path>] [--once] [--interval <seconds>] [--prune] [--caption] [--sync] [--embedding-url <url>] [--vdr-model <model>] [--vdr-dimensions <n>]
 clawgallery caption [--missing] [--file <path>] [--dry-run] [--model <model>] [--provider <provider>]
 clawgallery rename [--apply] [--dry-run] [--file <path>] [--style title|caption|date-title] [--force]
 clawgallery search [--mode keyword|embedding] <query...> [--limit <n>] [--json] [--case-sensitive] [--no-fuzzy] [--embedding-url <url>]

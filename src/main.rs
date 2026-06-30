@@ -117,6 +117,21 @@ struct PollArgs {
     /// Poll interval in seconds for continuous mode.
     #[arg(long, default_value_t = 10)]
     interval: u64,
+    /// Generate missing captions after each ingest pass.
+    #[arg(long)]
+    caption: bool,
+    /// Run VDR sync after ingest and optional captioning.
+    #[arg(long)]
+    sync: bool,
+    /// Override the VDR embedding server URL for --sync.
+    #[arg(long)]
+    embedding_url: Option<String>,
+    /// Override the VDR model for --sync.
+    #[arg(long, default_value = vdr::DEFAULT_VDR_MODEL)]
+    vdr_model: String,
+    /// Override embedding dimensions for --sync.
+    #[arg(long, default_value_t = vdr::DEFAULT_DIMENSIONS)]
+    vdr_dimensions: usize,
 }
 
 #[derive(Debug, Args)]
@@ -572,6 +587,41 @@ fn cmd_poll(paths: &AppPaths, args: PollArgs) -> Result<()> {
         );
         if args.ingest.prune {
             println!("pruned {} missing image(s)", stats.pruned);
+        }
+        if args.caption
+            && let Err(err) = cmd_caption(
+                paths,
+                CaptionArgs {
+                    missing: true,
+                    file: None,
+                    dry_run: false,
+                    model: None,
+                    provider: None,
+                },
+            )
+        {
+            println!(
+                "caption stage failed: {}",
+                mask_api_keys(&format!("{err:#}"))
+            );
+            log_error(paths, "poll_caption", err);
+        }
+        if args.sync
+            && let Err(err) = vdr::cmd_sync(
+                paths,
+                vdr::VdrSyncArgs {
+                    prune: args.ingest.prune,
+                    embedding_url: args.embedding_url.clone(),
+                    model: args.vdr_model.clone(),
+                    dimensions: args.vdr_dimensions,
+                },
+            )
+        {
+            println!(
+                "vdr sync stage failed: {}",
+                mask_api_keys(&format!("{err:#}"))
+            );
+            log_error(paths, "poll_vdr_sync", err);
         }
         if args.once {
             break;

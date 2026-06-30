@@ -630,6 +630,53 @@ fn bootstrap_without_prune_does_not_touch_missing_records() {
 }
 
 #[test]
+fn poll_once_caption_sync_logs_stage_failures_without_stopping_poll() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).unwrap();
+    fs::write(images.join("new.png"), b"not really png").unwrap();
+
+    assert_success(run(&config, &["init"]));
+    assert_success(run(&config, &["folder", "add", images.to_str().unwrap()]));
+
+    let stdout = assert_success(run(
+        &config,
+        &[
+            "poll",
+            "--once",
+            "--caption",
+            "--sync",
+            "--embedding-url",
+            "http://127.0.0.1:9",
+        ],
+    ));
+    assert!(stdout.contains("ingested 1 new image(s)"), "got: {stdout}");
+    assert!(
+        stdout.contains("caption stage failed"),
+        "poll should report caption stage failure without aborting, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("vdr sync stage failed"),
+        "poll should report vdr sync failure without aborting, got: {stdout}"
+    );
+
+    let errors = read_jsonl(&config.join("errors.jsonl"));
+    assert!(
+        errors
+            .iter()
+            .any(|record| record["context"] == "poll_caption"),
+        "caption failure should be logged to errors.jsonl: {errors:#?}"
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|record| record["context"] == "poll_vdr_sync"),
+        "vdr sync failure should be logged to errors.jsonl: {errors:#?}"
+    );
+}
+
+#[test]
 fn search_and_status_ignore_pruned_records() {
     let temp = tempfile::tempdir().unwrap();
     let config = temp.path().join("state");

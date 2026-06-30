@@ -12,8 +12,8 @@ mod store;
 pub(crate) use search::cmd_embedding_search;
 
 const DEFAULT_EMBEDDING_URL: &str = "http://127.0.0.1:8765";
-const DEFAULT_VDR_MODEL: &str = "vidore/colqwen2-v1.0";
-const DEFAULT_DIMENSIONS: usize = 128;
+pub(crate) const DEFAULT_VDR_MODEL: &str = "vidore/colqwen2-v1.0";
+pub(crate) const DEFAULT_DIMENSIONS: usize = 128;
 const DEFAULT_MLX_MODEL: &str = "qnguyen3/colqwen2.5-v0.2-mlx";
 const DEFAULT_MLX_DIMENSIONS: usize = 128;
 
@@ -31,15 +31,15 @@ enum VdrCommand {
 }
 
 #[derive(Debug, Args)]
-struct VdrSyncArgs {
+pub(crate) struct VdrSyncArgs {
     #[arg(long)]
-    prune: bool,
+    pub(crate) prune: bool,
     #[arg(long)]
-    embedding_url: Option<String>,
+    pub(crate) embedding_url: Option<String>,
     #[arg(long, default_value = DEFAULT_VDR_MODEL)]
-    model: String,
+    pub(crate) model: String,
     #[arg(long, default_value_t = DEFAULT_DIMENSIONS)]
-    dimensions: usize,
+    pub(crate) dimensions: usize,
 }
 
 #[derive(Debug, Args)]
@@ -122,7 +122,7 @@ fn cmd_serve(args: VdrServeArgs) -> Result<()> {
     })
 }
 
-fn cmd_sync(paths: &AppPaths, args: VdrSyncArgs) -> Result<()> {
+pub(crate) fn cmd_sync(paths: &AppPaths, args: VdrSyncArgs) -> Result<()> {
     let conn = store::open_store(paths)?;
     let captions = crate::latest_captions_by_path(paths)?;
     let (images, refreshed_files) = crate::latest_images_refreshing_changed_files(paths)?;
