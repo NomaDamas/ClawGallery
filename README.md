@@ -2,6 +2,8 @@
 
 ClawGallery is a Rust CLI for an agent-native screenshot gallery. It registers screenshot/image folders, bootstraps and polls for new images, stores metadata in JSONL, can call a visual-understanding model for titles/captions, safely renames files, and supports keyword search.
 
+Supported image extensions are `png`, `jpg`, `jpeg`, `webp`, `avif`, `gif`, `heic`, and `heif`. HEIC/HEIF files are tracked like other images; captioning converts them to JPEG before sending them to the configured vision provider. On macOS the default converter is `sips`; set `CLAWGALLERY_HEIC_CONVERTER` to an executable that accepts `<input> <output>` to use another converter.
+
 ## Install / build
 
 ```bash
@@ -167,7 +169,7 @@ Lowercase queries use smart-case matching; any uppercase atom becomes case-sensi
 
 VDR stores image embeddings for every active image and stores caption embeddings only when an active image has caption text. The store is embedded SQLite so it needs no daemon, works well on macOS, and stays inside the same config directory as the JSONL state. `clawgallery vdr sync` is incremental: unchanged image and caption content hashes are skipped, changed files or captions are re-embedded, and `--prune` deactivates vectors for images that are no longer active after `bootstrap --prune`.
 
-The local embedding server contract accepts `kind` values `image`, `text`, or `caption`; `caption` is caption-document text encoded like text. `role` is `document` or `query` and a compatible server may ignore it. Responses may contain either one vector per input or multi-vector embeddings per input.
+The local embedding server contract accepts `kind` values `image`, `text`, or `caption`; `caption` is caption-document text encoded like text. For image inputs, `value` is the image path, including `.heic`/`.heif` paths, so the embedding server must have any needed HEIC decoder such as Pillow plus `pillow-heif`. `role` is `document` or `query` and a compatible server may ignore it. Responses may contain either one vector per input or multi-vector embeddings per input.
 
 ```text
 POST /embed

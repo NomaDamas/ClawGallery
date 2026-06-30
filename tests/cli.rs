@@ -223,6 +223,29 @@ fn caption_dry_run_accepts_concurrency_flag() {
 }
 
 #[test]
+fn bootstrap_ingests_heic_and_heif_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).unwrap();
+    fs::write(images.join("iphone.heic"), b"fake heic").unwrap();
+    fs::write(images.join("camera.heif"), b"fake heif").unwrap();
+
+    assert_success(run(&config, &["init"]));
+    let bootstrapped = assert_success(run(
+        &config,
+        &["bootstrap", "--path", images.to_str().unwrap()],
+    ));
+
+    assert!(
+        bootstrapped.contains("ingested 2"),
+        "HEIC/HEIF files should be ingested, got: {bootstrapped}"
+    );
+    let search = assert_success(run(&config, &["search", "iphone"]));
+    assert!(search.contains("iphone.heic"));
+}
+
+#[test]
 fn caption_dry_run_with_explicit_file_does_not_require_credentials() {
     let temp = tempfile::tempdir().unwrap();
     let config = temp.path().join("state");

@@ -31,6 +31,35 @@ fn vdr_sync_retries_transient_429_then_succeeds() {
 }
 
 #[test]
+fn vdr_sync_indexes_heic_image_paths() {
+    let server = FakeEmbeddingServer::start();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).expect("create images");
+    fs::write(images.join("dog.heic"), b"dog image bytes").expect("write heic image");
+
+    assert_success(run(&config, &["init"], server.url()));
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", images.to_str().expect("utf8")],
+        server.url(),
+    ));
+
+    let synced = assert_success(run(
+        &config,
+        &["vdr", "sync", "--dimensions", "4"],
+        server.url(),
+    ));
+    let status = assert_success(run(&config, &["vdr", "status", "--json"], server.url()));
+
+    assert!(synced.contains("indexed 1"), "got: {synced}");
+    let status: serde_json::Value = serde_json::from_str(&status).expect("status json");
+    assert_eq!(status["active_images"], 1);
+    assert_eq!(status["active_vectors"], 1);
+}
+
+#[test]
 fn vdr_late_interaction_ranks_with_multivector_maxsim() {
     // Given: a multi-vector (late-interaction) embedding server and two images.
     let server = FakeEmbeddingServer::start_multivector();

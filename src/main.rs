@@ -16,7 +16,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, BufRead, BufReader, Write},
     path::{Path, PathBuf},
-    process::ExitCode,
+    process::{Command as ProcessCommand, ExitCode},
     thread,
     time::Duration,
 };
@@ -29,7 +29,8 @@ mod vdr;
 const APP_DIR_NAME: &str = "clawgallery";
 const DEFAULT_MODEL: &str = "gpt-4.1-mini";
 const DEFAULT_FILENAME_LIMIT_BYTES: usize = 240;
-const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "avif", "gif"];
+const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "avif", "gif", "heic", "heif"];
+const HEIC_CONVERTER_ENV: &str = "CLAWGALLERY_HEIC_CONVERTER";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -417,6 +418,11 @@ struct ErrorRecord {
 struct CaptionOutput {
     title: String,
     description: String,
+}
+
+struct CaptionImagePayload {
+    mime_type: &'static str,
+    bytes: Vec<u8>,
 }
 
 struct CaptionJobResult {
@@ -2022,12 +2028,11 @@ impl OpenAiCompatProvider {
     }
 
     fn caption_image(&self, path: &Path) -> Result<CaptionOutput> {
-        let image_data =
-            fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+        let payload = caption_image_payload(path)?;
         let data_url = format!(
             "data:{};base64,{}",
-            mime_for_path(path),
-            base64::engine::general_purpose::STANDARD.encode(image_data)
+            payload.mime_type,
+            base64::engine::general_purpose::STANDARD.encode(payload.bytes)
         );
         let request = json!({
             "model": self.model,
@@ -2098,14 +2103,13 @@ impl GeminiProvider {
     }
 
     fn caption_image(&self, path: &Path) -> Result<CaptionOutput> {
-        let image_data =
-            fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-        let b64 = base64::engine::general_purpose::STANDARD.encode(image_data);
+        let payload = caption_image_payload(path)?;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(payload.bytes);
         let request = json!({
             "contents": [{
                 "parts": [
                     {"text": caption_prompt()},
-                    {"inline_data": {"mime_type": mime_for_path(path), "data": b64}}
+                    {"inline_data": {"mime_type": payload.mime_type, "data": b64}}
                 ]
             }]
         });
@@ -2304,8 +2308,71 @@ fn mime_for_path(path: &Path) -> &'static str {
         Some(ext) if ext == "webp" => "image/webp",
         Some(ext) if ext == "avif" => "image/avif",
         Some(ext) if ext == "gif" => "image/gif",
+        Some(ext) if ext == "heic" => "image/heic",
+        Some(ext) if ext == "heif" => "image/heif",
         _ => "image/png",
     }
+}
+
+fn caption_image_payload(path: &Path) -> Result<CaptionImagePayload> {
+    let converter = env::var_os(HEIC_CONVERTER_ENV).map(PathBuf::from);
+    caption_image_payload_with_converter(path, converter.as_deref())
+}
+
+fn caption_image_payload_with_converter(
+    path: &Path,
+    converter: Option<&Path>,
+) -> Result<CaptionImagePayload> {
+    if is_heic_path(path) {
+        return convert_heic_payload(path, converter);
+    }
+    Ok(CaptionImagePayload {
+        mime_type: mime_for_path(path),
+        bytes: fs::read(path).with_context(|| format!("failed to read {}", path.display()))?,
+    })
+}
+
+fn convert_heic_payload(path: &Path, converter: Option<&Path>) -> Result<CaptionImagePayload> {
+    let output = env::temp_dir().join(format!("clawgallery-{}.jpg", Uuid::new_v4()));
+    let status = if let Some(converter) = converter {
+        ProcessCommand::new(converter)
+            .arg(path)
+            .arg(&output)
+            .status()
+            .with_context(|| format!("failed to launch HEIC converter {}", converter.display()))?
+    } else {
+        ProcessCommand::new("sips")
+            .arg("-s")
+            .arg("format")
+            .arg("jpeg")
+            .arg(path)
+            .arg("--out")
+            .arg(&output)
+            .status()
+            .context("failed to launch HEIC converter sips")?
+    };
+    if !status.success() {
+        bail!(
+            "HEIC conversion failed for {}; install sips/libheif tooling or set {HEIC_CONVERTER_ENV}",
+            path.display()
+        );
+    }
+    let bytes = fs::read(&output)
+        .with_context(|| format!("failed to read converted HEIC {}", output.display()))?;
+    let _ = fs::remove_file(&output);
+    Ok(CaptionImagePayload {
+        mime_type: "image/jpeg",
+        bytes,
+    })
+}
+
+fn is_heic_path(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(OsStr::to_str)
+            .map(|s| s.to_lowercase()),
+        Some(ext) if ext == "heic" || ext == "heif"
+    )
 }
 
 fn rename_candidate(path: &Path, title: &str, limit_bytes: usize) -> Result<PathBuf> {
@@ -2499,7 +2566,34 @@ mod tests {
     fn detects_supported_images_case_insensitively() {
         assert!(is_image_path(Path::new("Screen.PNG")));
         assert!(is_image_path(Path::new("photo.avif")));
+        assert!(is_image_path(Path::new("IMG_0001.HEIC")));
+        assert!(is_image_path(Path::new("IMG_0002.heif")));
         assert!(!is_image_path(Path::new("notes.txt")));
+    }
+
+    #[test]
+    fn mime_for_path_recognizes_heic_heif() {
+        assert_eq!(mime_for_path(Path::new("photo.heic")), "image/heic");
+        assert_eq!(mime_for_path(Path::new("photo.heif")), "image/heif");
+    }
+
+    #[test]
+    fn caption_image_payload_converts_heic_with_configured_converter() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("photo.heic");
+        let converter = dir.path().join("convert.sh");
+        fs::write(&input, b"heic bytes").unwrap();
+        fs::write(&converter, "#!/bin/sh\nprintf converted-jpeg > \"$2\"\n").unwrap();
+        let mut permissions = fs::metadata(&converter).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&converter, permissions).unwrap();
+
+        let payload = caption_image_payload_with_converter(&input, Some(&converter)).unwrap();
+
+        assert_eq!(payload.mime_type, "image/jpeg");
+        assert_eq!(payload.bytes, b"converted-jpeg");
     }
 
     #[test]
