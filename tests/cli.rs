@@ -543,7 +543,7 @@ fn search_levenshtein_skipped_for_short_atom() {
         "2026-05-04T00:00:00Z",
         true,
     )]);
-    let stdout = assert_success(run(&config, &["search", "ui"]));
+    let stdout = assert_success(run(&config, &["search", "UI"]));
     assert!(stdout.trim().is_empty(), "got: {stdout}");
 }
 
