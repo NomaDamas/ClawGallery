@@ -193,6 +193,36 @@ fn caption_dry_run_does_not_require_credentials() {
 }
 
 #[test]
+fn caption_dry_run_accepts_concurrency_flag() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).unwrap();
+    fs::write(images.join("first.png"), b"first").unwrap();
+    fs::write(images.join("second.png"), b"second").unwrap();
+
+    assert_success(run(&config, &["init"]));
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", images.to_str().unwrap()],
+    ));
+
+    let serial = assert_success(run(
+        &config,
+        &["caption", "--dry-run", "--concurrency", "1"],
+    ));
+    let parallel = assert_success(run(
+        &config,
+        &["caption", "--dry-run", "--concurrency", "2"],
+    ));
+
+    assert_eq!(serial, parallel);
+    assert!(serial.contains("would caption "));
+    assert!(serial.contains("first.png"));
+    assert!(serial.contains("second.png"));
+}
+
+#[test]
 fn caption_dry_run_with_explicit_file_does_not_require_credentials() {
     let temp = tempfile::tempdir().unwrap();
     let config = temp.path().join("state");

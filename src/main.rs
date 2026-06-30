@@ -151,6 +151,9 @@ struct CaptionArgs {
     /// Override provider for this run (openai-compatible or gemini).
     #[arg(long)]
     provider: Option<String>,
+    /// Maximum caption requests in flight.
+    #[arg(long, default_value_t = 4)]
+    concurrency: usize,
 }
 
 #[derive(Debug, Args)]
@@ -360,6 +363,13 @@ struct ErrorRecord {
 struct CaptionOutput {
     title: String,
     description: String,
+}
+
+struct CaptionJobResult {
+    image: ImageRecord,
+    filename_meaningful: Option<bool>,
+    classification_error: Option<anyhow::Error>,
+    caption: Result<CaptionOutput>,
 }
 
 enum Provider {
@@ -597,6 +607,7 @@ fn cmd_poll(paths: &AppPaths, args: PollArgs) -> Result<()> {
                     dry_run: false,
                     model: None,
                     provider: None,
+                    concurrency: 4,
                 },
             )
         {
@@ -674,32 +685,26 @@ fn cmd_caption(paths: &AppPaths, args: CaptionArgs) -> Result<()> {
         return Ok(());
     }
     let provider = build_provider(&config, args.provider, args.model.clone())?;
-    for image in images {
-        let stem = image.path.file_stem().and_then(OsStr::to_str).unwrap_or("");
-        let resolved_meaningful = match classify_filename(stem) {
-            NameClassification::Generic => Some(false),
-            NameClassification::NeedsModel => match provider.classify_stem(stem) {
-                Ok(b) => Some(b),
-                Err(err) => {
-                    log_error(paths, "classify_stem", err);
-                    None
-                }
-            },
-        };
-        match provider.caption_image(&image.path) {
+    for result in bounded_concurrent_map(images, args.concurrency, |image| {
+        caption_image_job(&provider, image)
+    })? {
+        if let Some(err) = result.classification_error {
+            log_error(paths, "classify_stem", err);
+        }
+        match result.caption {
             Ok(output) => {
                 let record = CaptionRecord {
-                    image_id: image.id.clone(),
-                    path: image.path.clone(),
+                    image_id: result.image.id.clone(),
+                    path: result.image.path.clone(),
                     title: output.title,
                     description: output.description,
                     model: effective_model.clone(),
                     provider: effective_provider.clone(),
                     created_at: Utc::now(),
-                    filename_meaningful: resolved_meaningful,
+                    filename_meaningful: result.filename_meaningful,
                 };
                 append_jsonl(&paths.captions, &record)?;
-                println!("captioned {}", image.path.display());
+                println!("captioned {}", result.image.path.display());
             }
             Err(err) => {
                 log_error(paths, "caption", err);
@@ -707,6 +712,60 @@ fn cmd_caption(paths: &AppPaths, args: CaptionArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn caption_image_job(provider: &Provider, image: ImageRecord) -> CaptionJobResult {
+    let stem = image.path.file_stem().and_then(OsStr::to_str).unwrap_or("");
+    let (filename_meaningful, classification_error) = match classify_filename(stem) {
+        NameClassification::Generic => (Some(false), None),
+        NameClassification::NeedsModel => match provider.classify_stem(stem) {
+            Ok(value) => (Some(value), None),
+            Err(err) => (None, Some(err)),
+        },
+    };
+    let caption = provider.caption_image(&image.path);
+    CaptionJobResult {
+        image,
+        filename_meaningful,
+        classification_error,
+        caption,
+    }
+}
+
+fn bounded_concurrent_map<T, R, F>(items: Vec<T>, concurrency: usize, worker: F) -> Result<Vec<R>>
+where
+    T: Send,
+    R: Send,
+    F: Fn(T) -> R + Sync,
+{
+    let limit = concurrency.max(1);
+    let mut iter = items.into_iter();
+    let mut results = Vec::new();
+    loop {
+        let batch: Vec<T> = iter.by_ref().take(limit).collect();
+        if batch.is_empty() {
+            break;
+        }
+        let mut batch_results = thread::scope(|scope| -> Result<Vec<R>> {
+            let handles: Vec<_> = batch
+                .into_iter()
+                .map(|item| {
+                    let worker = &worker;
+                    scope.spawn(move || worker(item))
+                })
+                .collect();
+            let mut batch_results = Vec::with_capacity(handles.len());
+            for handle in handles {
+                match handle.join() {
+                    Ok(result) => batch_results.push(result),
+                    Err(_) => bail!("caption worker panicked"),
+                }
+            }
+            Ok(batch_results)
+        })?;
+        results.append(&mut batch_results);
+    }
+    Ok(results)
 }
 
 fn cmd_rename(paths: &AppPaths, args: RenameArgs) -> Result<()> {
@@ -2191,6 +2250,32 @@ mod tests {
     #[test]
     fn config_model_used_when_cli_absent() {
         assert_eq!(resolve_model(None, "gpt-4.1-mini"), "gpt-4.1-mini");
+    }
+
+    #[test]
+    fn bounded_concurrent_map_preserves_order_and_limits_in_flight() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_in_flight = Arc::new(AtomicUsize::new(0));
+        let outputs = bounded_concurrent_map(vec![1_u8, 2, 3, 4], 2, {
+            let in_flight = Arc::clone(&in_flight);
+            let max_in_flight = Arc::clone(&max_in_flight);
+            move |item| {
+                let current = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                max_in_flight.fetch_max(current, Ordering::SeqCst);
+                thread::sleep(Duration::from_millis(20));
+                in_flight.fetch_sub(1, Ordering::SeqCst);
+                item * 10
+            }
+        })
+        .unwrap();
+
+        assert_eq!(outputs, vec![10, 20, 30, 40]);
+        assert_eq!(max_in_flight.load(Ordering::SeqCst), 2);
     }
 
     #[test]
