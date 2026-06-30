@@ -31,6 +31,8 @@ const DEFAULT_MODEL: &str = "gpt-4.1-mini";
 const DEFAULT_FILENAME_LIMIT_BYTES: usize = 240;
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "avif", "gif", "heic", "heif"];
 const HEIC_CONVERTER_ENV: &str = "CLAWGALLERY_HEIC_CONVERTER";
+const DAEMON_DIR_ENV: &str = "CLAWGALLERY_DAEMON_DIR";
+const DAEMON_LABEL: &str = "com.clawgallery.poll";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -66,6 +68,7 @@ enum Command {
     Search(SearchArgs),
     /// Manage local visual document retrieval embeddings.
     Vdr(vdr::VdrArgs),
+    Daemon(DaemonArgs),
     /// Show state and configuration summary.
     Status,
     /// Print or locate the bundled Vercel Agent Skill.
@@ -206,6 +209,43 @@ struct DedupArgs {
     threshold: f64,
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Args)]
+struct DaemonArgs {
+    #[command(subcommand)]
+    command: DaemonCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum DaemonCommand {
+    Install(DaemonPollArgs),
+    Start,
+    Stop,
+    Status,
+    Uninstall,
+    Logs,
+    Run(DaemonPollArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+struct DaemonPollArgs {
+    #[arg(long, default_value_t = 30)]
+    interval: u64,
+    #[arg(long)]
+    caption: bool,
+    #[arg(long)]
+    sync: bool,
+    #[arg(long)]
+    path: Option<PathBuf>,
+    #[arg(long)]
+    folder: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DaemonState {
+    pid: u32,
+    last_started: DateTime<Utc>,
 }
 
 #[derive(Debug, Serialize)]
@@ -516,6 +556,7 @@ fn run() -> Result<()> {
         Command::Dedup(args) => cmd_dedup(&paths, args),
         Command::Search(args) => cmd_search(&paths, args),
         Command::Vdr(args) => vdr::cmd_vdr(&paths, args),
+        Command::Daemon(args) => cmd_daemon(&paths, args),
         Command::Status => cmd_status(&paths),
         Command::Skill { command } => match command {
             SkillCommand::Path => cmd_skill_path(&paths),
@@ -1215,6 +1256,277 @@ fn print_dedup_group(group: &DedupGroupOutput, json_output: bool) -> Result<()> 
         println!("  {:.4} {}", duplicate.score, duplicate.path.display());
     }
     Ok(())
+}
+
+fn cmd_daemon(paths: &AppPaths, args: DaemonArgs) -> Result<()> {
+    paths.ensure()?;
+    match args.command {
+        DaemonCommand::Install(args) => cmd_daemon_install(paths, args),
+        DaemonCommand::Start => cmd_daemon_start(paths),
+        DaemonCommand::Stop => cmd_daemon_stop(paths),
+        DaemonCommand::Status => cmd_daemon_status(paths),
+        DaemonCommand::Uninstall => cmd_daemon_uninstall(paths),
+        DaemonCommand::Logs => cmd_daemon_logs(paths),
+        DaemonCommand::Run(args) => cmd_daemon_run(paths, args),
+    }
+}
+
+fn cmd_daemon_install(paths: &AppPaths, args: DaemonPollArgs) -> Result<()> {
+    let service_file = daemon_service_file()?;
+    if let Some(parent) = service_file.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let exe = env::current_exe().context("failed to resolve current executable")?;
+    let arguments = daemon_run_arguments(&exe, &args);
+    let content = if service_file.extension().and_then(OsStr::to_str) == Some("service") {
+        systemd_service(paths, &arguments)
+    } else {
+        launchd_plist(paths, &arguments)
+    };
+    fs::write(&service_file, content)
+        .with_context(|| format!("failed to write {}", service_file.display()))?;
+    println!("installed daemon service {}", service_file.display());
+    println!("logs: {}", daemon_log_path(paths).display());
+    Ok(())
+}
+
+fn cmd_daemon_start(paths: &AppPaths) -> Result<()> {
+    let service_file = daemon_service_file()?;
+    if env::var_os(DAEMON_DIR_ENV).is_some() {
+        println!(
+            "start skipped for managed test service {}",
+            service_file.display()
+        );
+        return Ok(());
+    }
+    if service_file.extension().and_then(OsStr::to_str) == Some("service") {
+        run_status_command(
+            "systemctl",
+            &["--user", "start", "clawgallery-poll.service"],
+        )?;
+    } else {
+        let service = service_file.to_string_lossy().to_string();
+        run_status_command("launchctl", &["load", service.as_str()])?;
+    }
+    println!("started daemon service");
+    println!("logs: {}", daemon_log_path(paths).display());
+    Ok(())
+}
+
+fn cmd_daemon_stop(_paths: &AppPaths) -> Result<()> {
+    let service_file = daemon_service_file()?;
+    if env::var_os(DAEMON_DIR_ENV).is_some() {
+        println!(
+            "stop skipped for managed test service {}",
+            service_file.display()
+        );
+        return Ok(());
+    }
+    if service_file.extension().and_then(OsStr::to_str) == Some("service") {
+        run_status_command("systemctl", &["--user", "stop", "clawgallery-poll.service"])?;
+    } else {
+        let service = service_file.to_string_lossy().to_string();
+        run_status_command("launchctl", &["unload", service.as_str()])?;
+    }
+    println!("stopped daemon service");
+    Ok(())
+}
+
+fn cmd_daemon_status(paths: &AppPaths) -> Result<()> {
+    let service_file = daemon_service_file()?;
+    println!(
+        "installed: {}",
+        if service_file.exists() { "yes" } else { "no" }
+    );
+    println!("service_file: {}", service_file.display());
+    println!("logs: {}", daemon_log_path(paths).display());
+    match read_daemon_state(paths)? {
+        Some(state) => {
+            println!("pid: {}", state.pid);
+            println!("last_started: {}", state.last_started.to_rfc3339());
+        }
+        None => {
+            println!("pid: <unknown>");
+            println!("last_started: <never>");
+        }
+    }
+    Ok(())
+}
+
+fn cmd_daemon_uninstall(paths: &AppPaths) -> Result<()> {
+    let service_file = daemon_service_file()?;
+    if service_file.exists() {
+        fs::remove_file(&service_file)
+            .with_context(|| format!("failed to remove {}", service_file.display()))?;
+        println!("uninstalled daemon service {}", service_file.display());
+    } else {
+        println!("daemon service was not installed");
+    }
+    let _ = fs::remove_file(daemon_pid_path(paths));
+    Ok(())
+}
+
+fn cmd_daemon_logs(paths: &AppPaths) -> Result<()> {
+    let log_path = daemon_log_path(paths);
+    if log_path.exists() {
+        print!("{}", fs::read_to_string(&log_path)?);
+    } else {
+        println!("no daemon logs at {}", log_path.display());
+    }
+    Ok(())
+}
+
+fn cmd_daemon_run(paths: &AppPaths, args: DaemonPollArgs) -> Result<()> {
+    write_daemon_state(paths)?;
+    cmd_poll(
+        paths,
+        PollArgs {
+            ingest: IngestArgs {
+                folder: args.folder,
+                path: args.path,
+                prune: true,
+            },
+            once: false,
+            interval: args.interval,
+            caption: args.caption,
+            sync: args.sync,
+            embedding_url: None,
+            vdr_model: vdr::DEFAULT_VDR_MODEL.to_string(),
+            vdr_dimensions: vdr::DEFAULT_DIMENSIONS,
+            max_retries: vdr::DEFAULT_MAX_RETRIES,
+        },
+    )
+}
+
+fn daemon_run_arguments(exe: &Path, args: &DaemonPollArgs) -> Vec<String> {
+    let mut values = vec![
+        exe.display().to_string(),
+        "daemon".to_string(),
+        "run".to_string(),
+        "--interval".to_string(),
+        args.interval.to_string(),
+    ];
+    if args.caption {
+        values.push("--caption".to_string());
+    }
+    if args.sync {
+        values.push("--sync".to_string());
+    }
+    if let Some(path) = &args.path {
+        values.push("--path".to_string());
+        values.push(path.display().to_string());
+    }
+    if let Some(folder) = &args.folder {
+        values.push("--folder".to_string());
+        values.push(folder.clone());
+    }
+    values
+}
+
+fn launchd_plist(paths: &AppPaths, arguments: &[String]) -> String {
+    let args = arguments
+        .iter()
+        .map(|value| format!("    <string>{}</string>", xml_escape(value)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+<plist version=\"1.0\">\n\
+<dict>\n\
+  <key>Label</key><string>{DAEMON_LABEL}</string>\n\
+  <key>ProgramArguments</key>\n\
+  <array>\n{args}\n  </array>\n\
+  <key>RunAtLoad</key><true/>\n\
+  <key>KeepAlive</key><true/>\n\
+  <key>StandardOutPath</key><string>{}</string>\n\
+  <key>StandardErrorPath</key><string>{}</string>\n\
+</dict>\n\
+</plist>\n",
+        xml_escape(&daemon_log_path(paths).display().to_string()),
+        xml_escape(&daemon_log_path(paths).display().to_string())
+    )
+}
+
+fn systemd_service(paths: &AppPaths, arguments: &[String]) -> String {
+    let command = arguments
+        .iter()
+        .map(|value| shell_quote(value))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "[Unit]\nDescription=ClawGallery poll daemon\n\n[Service]\nExecStart={command}\nRestart=always\nStandardOutput=append:{}\nStandardError=append:{}\n\n[Install]\nWantedBy=default.target\n",
+        daemon_log_path(paths).display(),
+        daemon_log_path(paths).display()
+    )
+}
+
+fn daemon_service_file() -> Result<PathBuf> {
+    if let Some(dir) = env::var_os(DAEMON_DIR_ENV) {
+        return Ok(PathBuf::from(dir).join(format!("{DAEMON_LABEL}.plist")));
+    }
+    if cfg!(target_os = "linux") {
+        let dir = dirs::config_dir()
+            .ok_or_else(|| anyhow!("could not resolve config directory"))?
+            .join("systemd/user");
+        return Ok(dir.join("clawgallery-poll.service"));
+    }
+    let dir = dirs::home_dir()
+        .ok_or_else(|| anyhow!("could not resolve home directory"))?
+        .join("Library/LaunchAgents");
+    Ok(dir.join(format!("{DAEMON_LABEL}.plist")))
+}
+
+fn daemon_log_path(paths: &AppPaths) -> PathBuf {
+    paths.root.join("daemon.log")
+}
+
+fn daemon_pid_path(paths: &AppPaths) -> PathBuf {
+    paths.root.join("daemon.pid")
+}
+
+fn daemon_state_path(paths: &AppPaths) -> PathBuf {
+    paths.root.join("daemon-status.json")
+}
+
+fn write_daemon_state(paths: &AppPaths) -> Result<()> {
+    let state = DaemonState {
+        pid: std::process::id(),
+        last_started: Utc::now(),
+    };
+    fs::write(daemon_pid_path(paths), state.pid.to_string())?;
+    fs::write(daemon_state_path(paths), serde_json::to_string(&state)?)?;
+    Ok(())
+}
+
+fn read_daemon_state(paths: &AppPaths) -> Result<Option<DaemonState>> {
+    let state_path = daemon_state_path(paths);
+    if !state_path.exists() {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::from_str(&fs::read_to_string(
+        state_path,
+    )?)?))
+}
+
+fn run_status_command(program: &str, args: &[&str]) -> Result<()> {
+    let status = ProcessCommand::new(program).args(args).status()?;
+    if !status.success() {
+        bail!("{program} exited with {status}");
+    }
+    Ok(())
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn rename_no_clobber(source: &Path, target: &Path) -> io::Result<()> {

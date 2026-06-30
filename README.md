@@ -137,9 +137,15 @@ clawgallery search [--mode keyword|embedding] <query...> [--limit <n>] [--json] 
 clawgallery vdr sync [--prune] [--embedding-url <url>] [--model <model>] [--dimensions <n>] [--max-retries <n>]
 clawgallery vdr serve [--backend mlx] [--host <host>] [--port <port>] [--model <model>] [--dimensions <n>] [--device auto|mps|cpu] [--python <path>] [--allow-remote]
 clawgallery vdr status [--json]
+clawgallery daemon install [--interval <seconds>] [--caption] [--sync] [--path <path>] [--folder <id>]
+clawgallery daemon start|stop|status|uninstall|logs
 clawgallery status
 clawgallery skill path|print
 ```
+
+## Daemon
+
+`clawgallery daemon install` writes a user service that runs `clawgallery daemon run`, which records a small status file and then starts the poll loop. macOS uses a LaunchAgent plist under `~/Library/LaunchAgents`; Linux uses a `systemd --user` unit under the user config directory. Logs are written to `daemon.log` in the ClawGallery config directory, and `daemon status` reports the service file, log path, PID when known, and last start time. Set `CLAWGALLERY_DAEMON_DIR` to write the service file somewhere else for tests or managed deployments.
 
 ## Dedup
 

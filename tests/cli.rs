@@ -18,6 +18,19 @@ fn run(config: &Path, args: &[&str]) -> Output {
         .expect("clawgallery command should run")
 }
 
+fn run_with_env(config: &Path, args: &[&str], envs: &[(&str, &Path)]) -> Output {
+    let mut command = Command::new(bin());
+    command
+        .env("CLAWGALLERY_CONFIG_DIR", config)
+        .env_remove("OPENAI_API_KEY")
+        .env("CODEX_HOME", config.join("codex-home"))
+        .args(args);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    command.output().expect("clawgallery command should run")
+}
+
 fn assert_success(output: Output) -> String {
     if !output.status.success() {
         panic!(
@@ -119,6 +132,77 @@ fn skill_path_materializes_embedded_skill() {
     assert!(path.exists());
     let skill = fs::read_to_string(path).unwrap();
     assert!(skill.contains("name: clawgallery"));
+}
+
+#[test]
+fn daemon_install_status_and_uninstall_use_managed_service_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    let daemon_dir = temp.path().join("daemon-services");
+    assert_success(run(&config, &["init"]));
+
+    let installed = assert_success(run_with_env(
+        &config,
+        &[
+            "daemon",
+            "install",
+            "--interval",
+            "5",
+            "--caption",
+            "--sync",
+        ],
+        &[("CLAWGALLERY_DAEMON_DIR", daemon_dir.as_path())],
+    ));
+
+    assert!(
+        installed.contains("installed daemon service"),
+        "got: {installed}"
+    );
+    let service_file = daemon_dir.join("com.clawgallery.poll.plist");
+    assert!(
+        service_file.exists(),
+        "daemon install should write service file"
+    );
+    let service = fs::read_to_string(&service_file).unwrap();
+    assert!(service.contains("daemon"));
+    assert!(service.contains("run"));
+    assert!(service.contains("--caption"));
+    assert!(service.contains("--sync"));
+
+    let status = assert_success(run_with_env(
+        &config,
+        &["daemon", "status"],
+        &[("CLAWGALLERY_DAEMON_DIR", daemon_dir.as_path())],
+    ));
+    assert!(status.contains("installed: yes"), "got: {status}");
+    assert!(status.contains("last_started: <never>"), "got: {status}");
+
+    let uninstalled = assert_success(run_with_env(
+        &config,
+        &["daemon", "uninstall"],
+        &[("CLAWGALLERY_DAEMON_DIR", daemon_dir.as_path())],
+    ));
+    assert!(uninstalled.contains("uninstalled daemon service"));
+    assert!(
+        !service_file.exists(),
+        "daemon uninstall should remove service file"
+    );
+}
+
+#[test]
+fn daemon_status_reports_missing_service_cleanly() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    let daemon_dir = temp.path().join("daemon-services");
+    assert_success(run(&config, &["init"]));
+
+    let status = assert_success(run_with_env(
+        &config,
+        &["daemon", "status"],
+        &[("CLAWGALLERY_DAEMON_DIR", daemon_dir.as_path())],
+    ));
+
+    assert!(status.contains("installed: no"), "got: {status}");
 }
 
 #[test]
