@@ -1143,6 +1143,66 @@ fn rename_apply_self_heals_when_source_already_missing() {
 }
 
 #[test]
+fn rename_undo_last_restores_original_path_and_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).unwrap();
+    let original = images.join("IMG_0042.png");
+    fs::write(&original, b"x").unwrap();
+    assert_success(run(&config, &["init"]));
+    assert_success(run(&config, &["folder", "add", images.to_str().unwrap()]));
+    assert_success(run(&config, &["bootstrap"]));
+    let canonical = original.canonicalize().unwrap();
+    let id = first_image_id(&config);
+    inject_caption(&config, &canonical, &id, "Restored Name", Some(false));
+    assert_success(run(&config, &["rename", "--apply", "--style", "title"]));
+    let renamed = images.join("restored-name.png");
+    assert!(renamed.exists(), "rename --apply should create target");
+    assert!(!original.exists(), "rename --apply should move original");
+
+    let undo = assert_success(run(&config, &["rename", "--undo", "--last"]));
+
+    assert!(undo.contains("undone 1"), "got: {undo}");
+    assert!(original.exists(), "undo should restore original file");
+    assert!(!renamed.exists(), "undo should remove renamed file");
+    let status = assert_success(run(&config, &["status"]));
+    assert!(status.contains("images: 1"), "got: {status}");
+    let search_original = assert_success(run(&config, &["search", "IMG_0042"]));
+    assert!(search_original.contains("IMG_0042.png"));
+    let search_renamed = assert_success(run(&config, &["search", "restored-name"]));
+    assert!(
+        !search_renamed.contains("restored-name.png"),
+        "undone path must not stay searchable, got: {search_renamed}"
+    );
+}
+
+#[test]
+fn rename_undo_last_skips_when_original_path_is_occupied() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).unwrap();
+    let original = images.join("IMG_0043.png");
+    fs::write(&original, b"x").unwrap();
+    assert_success(run(&config, &["init"]));
+    assert_success(run(&config, &["folder", "add", images.to_str().unwrap()]));
+    assert_success(run(&config, &["bootstrap"]));
+    let canonical = original.canonicalize().unwrap();
+    let id = first_image_id(&config);
+    inject_caption(&config, &canonical, &id, "Collision Name", Some(false));
+    assert_success(run(&config, &["rename", "--apply", "--style", "title"]));
+    let renamed = images.join("collision-name.png");
+    fs::write(&original, b"blocker").unwrap();
+
+    let undo = assert_success(run(&config, &["rename", "--undo", "--last"]));
+
+    assert!(undo.contains("skipped 1"), "got: {undo}");
+    assert!(renamed.exists(), "collision skip must leave renamed file");
+    assert_eq!(fs::read(&original).unwrap(), b"blocker");
+}
+
+#[test]
 fn rename_apply_continues_after_per_image_failure() {
     let temp = tempfile::tempdir().unwrap();
     let config = temp.path().join("state");

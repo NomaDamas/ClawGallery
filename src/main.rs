@@ -181,6 +181,10 @@ struct RenameArgs {
     /// Rename even when the current filename looks human-meaningful.
     #[arg(long)]
     force: bool,
+    #[arg(long)]
+    undo: bool,
+    #[arg(long)]
+    last: bool,
 }
 
 #[derive(Debug, Args)]
@@ -835,6 +839,12 @@ fn cmd_rename(paths: &AppPaths, args: RenameArgs) -> Result<()> {
     if args.apply && args.dry_run {
         bail!("--apply and --dry-run cannot be used together");
     }
+    if args.undo {
+        if args.apply {
+            bail!("--apply is not used with --undo; omit it to apply or pass --dry-run");
+        }
+        return cmd_rename_undo(paths, args);
+    }
     let config = read_config(paths)?;
     let captions = latest_captions_by_path(paths)?;
     let mut images = latest_images(paths)?;
@@ -946,6 +956,105 @@ fn cmd_rename(paths: &AppPaths, args: RenameArgs) -> Result<()> {
         println!("(would skip {skipped} meaningful-looking name(s); use --force to override)");
     }
     Ok(())
+}
+
+fn cmd_rename_undo(paths: &AppPaths, args: RenameArgs) -> Result<()> {
+    let records = undo_rename_records(paths, &args)?;
+    if records.is_empty() {
+        println!("no applied renames to undo");
+        return Ok(());
+    }
+    let active_images = latest_images(paths)?;
+    let dry_run = args.dry_run;
+    let mut undone = 0_usize;
+    let mut skipped = 0_usize;
+    let mut failed = 0_usize;
+    for record in records {
+        let Some(current_image) = active_images.iter().find(|image| image.path == record.to) else {
+            println!("would skip (missing state) {}", record.to.display());
+            skipped += 1;
+            continue;
+        };
+        if !record.to.exists() {
+            println!("would skip (missing source) {}", record.to.display());
+            skipped += 1;
+            continue;
+        }
+        if record.from.exists() {
+            println!("would skip (target exists) {}", record.from.display());
+            skipped += 1;
+            continue;
+        }
+        let undo_record = RenameRecord {
+            image_id: record.image_id.clone(),
+            from: record.to.clone(),
+            to: record.from.clone(),
+            applied: !dry_run,
+            reason: "undo".to_string(),
+            created_at: Utc::now(),
+        };
+        if dry_run {
+            append_jsonl(&paths.renames, &undo_record)?;
+            println!(
+                "would undo {} -> {}",
+                record.to.display(),
+                record.from.display()
+            );
+            undone += 1;
+            continue;
+        }
+        if let Err(err) = rename_no_clobber(&record.to, &record.from).with_context(|| {
+            format!(
+                "failed to undo rename {} to {}",
+                record.to.display(),
+                record.from.display()
+            )
+        }) {
+            log_error(paths, "rename_undo", err);
+            failed += 1;
+            continue;
+        }
+        append_jsonl(&paths.renames, &undo_record)?;
+        deactivate_image_record(paths, current_image)?;
+        let mut restored = current_image.clone();
+        restored.path = fs::canonicalize(&record.from).unwrap_or_else(|_| record.from.clone());
+        restored.active = true;
+        restored.removed_at = None;
+        append_jsonl(&paths.images, &restored)?;
+        println!(
+            "undone {} -> {}",
+            record.to.display(),
+            record.from.display()
+        );
+        undone += 1;
+    }
+    if dry_run {
+        println!("would undo {undone}, skipped {skipped}, failed {failed}");
+    } else {
+        println!("undone {undone}, skipped {skipped}, failed {failed}");
+    }
+    Ok(())
+}
+
+fn undo_rename_records(paths: &AppPaths, args: &RenameArgs) -> Result<Vec<RenameRecord>> {
+    let mut records: Vec<RenameRecord> = read_jsonl::<RenameRecord>(&paths.renames)?
+        .into_iter()
+        .filter(|record| record.applied)
+        .collect();
+    if let Some(file) = &args.file {
+        let canonical = fs::canonicalize(file).unwrap_or_else(|_| file.clone());
+        records.retain(|record| record.to == canonical || record.from == canonical);
+    }
+    if records.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !args.last && args.file.is_some() && records.len() == 1 {
+        return Ok(records);
+    }
+    let Some(record) = records.last().cloned() else {
+        return Ok(Vec::new());
+    };
+    Ok(vec![record])
 }
 
 fn cmd_forget(paths: &AppPaths, args: ForgetArgs) -> Result<()> {

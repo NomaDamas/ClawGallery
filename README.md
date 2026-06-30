@@ -128,6 +128,7 @@ clawgallery bootstrap [--folder <id>] [--path <path>] [--prune]
 clawgallery poll [--folder <id>] [--path <path>] [--once] [--interval <seconds>] [--prune] [--caption] [--sync] [--embedding-url <url>] [--vdr-model <model>] [--vdr-dimensions <n>] [--max-retries <n>]
 clawgallery caption [--missing] [--file <path>] [--dry-run] [--model <model>] [--provider <provider>] [--concurrency <n>] [--max-retries <n>]
 clawgallery rename [--apply] [--dry-run] [--file <path>] [--style title|caption|date-title] [--force]
+clawgallery rename --undo [--last] [--file <path>] [--dry-run]
 clawgallery forget --file <path> [--delete]
 clawgallery dedup [--exact] [--similar] [--threshold <0..1>] [--json]
 clawgallery search [--mode keyword|embedding] <query...> [--limit <n>] [--json] [--case-sensitive] [--no-fuzzy] [--embedding-url <url>]
@@ -201,6 +202,8 @@ Set `CLAWGALLERY_VDR_EMBEDDING_URL` or pass `--embedding-url` to point the CLI a
 Rename is dry-run by default. `--apply` is required to modify files. ClawGallery strips unsafe filename characters, preserves extensions, reserves suffix space for collisions, and refuses to overwrite existing files.
 
 When `rename --apply` encounters a tracked path that no longer exists on disk (already renamed, deleted externally, etc.) it prints `would skip (missing source) <path>`, appends an `active=false` record so the entry stops following the live set, and continues with the rest of the batch. Per-image rename failures (collision, permission, IO) are logged to `errors.jsonl` and the run prints a final `renamed N, skipped M meaningful-looking name(s), failed K` summary instead of aborting on the first failure. API keys appearing in any error message (URL `?key=`, `Authorization: Bearer …`, raw `sk-…` / `AIza…` strings) are redacted before being written to `errors.jsonl` or stderr.
+
+Use `rename --undo --last` to reverse the latest applied rename, or add `--file <path>` to target one rename record. Undo reuses the same no-clobber file move, appends a reverse `RenameRecord`, marks the renamed path inactive, and appends the restored original `ImageRecord`. `--dry-run` previews the reverse move without touching files.
 
 ### Meaningful-filename gate
 
