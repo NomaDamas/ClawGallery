@@ -32,7 +32,9 @@ const DEFAULT_FILENAME_LIMIT_BYTES: usize = 240;
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "avif", "gif", "heic", "heif"];
 const HEIC_CONVERTER_ENV: &str = "CLAWGALLERY_HEIC_CONVERTER";
 const DAEMON_DIR_ENV: &str = "CLAWGALLERY_DAEMON_DIR";
+const DAEMON_LABEL_ENV: &str = "CLAWGALLERY_DAEMON_LABEL";
 const DAEMON_LABEL: &str = "com.clawgallery.poll";
+const CONFIG_DIR_ENV: &str = "CLAWGALLERY_CONFIG_DIR";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -1278,10 +1280,12 @@ fn cmd_daemon_install(paths: &AppPaths, args: DaemonPollArgs) -> Result<()> {
     }
     let exe = env::current_exe().context("failed to resolve current executable")?;
     let arguments = daemon_run_arguments(&exe, &args);
+    let environment = daemon_environment(paths);
+    let label = daemon_label();
     let content = if service_file.extension().and_then(OsStr::to_str) == Some("service") {
-        systemd_service(paths, &arguments)
+        systemd_service(paths, &arguments, &environment)
     } else {
-        launchd_plist(paths, &arguments)
+        launchd_plist(paths, &label, &arguments, &environment)
     };
     fs::write(&service_file, content)
         .with_context(|| format!("failed to write {}", service_file.display()))?;
@@ -1300,10 +1304,8 @@ fn cmd_daemon_start(paths: &AppPaths) -> Result<()> {
         return Ok(());
     }
     if service_file.extension().and_then(OsStr::to_str) == Some("service") {
-        run_status_command(
-            "systemctl",
-            &["--user", "start", "clawgallery-poll.service"],
-        )?;
+        let service_name = daemon_systemd_unit_name(&service_file)?;
+        run_status_command("systemctl", &["--user", "start", service_name.as_str()])?;
     } else {
         let service = service_file.to_string_lossy().to_string();
         run_status_command("launchctl", &["load", service.as_str()])?;
@@ -1323,7 +1325,8 @@ fn cmd_daemon_stop(_paths: &AppPaths) -> Result<()> {
         return Ok(());
     }
     if service_file.extension().and_then(OsStr::to_str) == Some("service") {
-        run_status_command("systemctl", &["--user", "stop", "clawgallery-poll.service"])?;
+        let service_name = daemon_systemd_unit_name(&service_file)?;
+        run_status_command("systemctl", &["--user", "stop", service_name.as_str()])?;
     } else {
         let service = service_file.to_string_lossy().to_string();
         run_status_command("launchctl", &["unload", service.as_str()])?;
@@ -1423,39 +1426,55 @@ fn daemon_run_arguments(exe: &Path, args: &DaemonPollArgs) -> Vec<String> {
     values
 }
 
-fn launchd_plist(paths: &AppPaths, arguments: &[String]) -> String {
+fn launchd_plist(
+    paths: &AppPaths,
+    label: &str,
+    arguments: &[String],
+    environment: &[(String, String)],
+) -> String {
     let args = arguments
         .iter()
         .map(|value| format!("    <string>{}</string>", xml_escape(value)))
         .collect::<Vec<_>>()
         .join("\n");
+    let environment = launchd_environment(environment);
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
 <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
 <plist version=\"1.0\">\n\
 <dict>\n\
-  <key>Label</key><string>{DAEMON_LABEL}</string>\n\
+  <key>Label</key><string>{}</string>\n\
   <key>ProgramArguments</key>\n\
   <array>\n{args}\n  </array>\n\
+{environment}\
   <key>RunAtLoad</key><true/>\n\
   <key>KeepAlive</key><true/>\n\
   <key>StandardOutPath</key><string>{}</string>\n\
   <key>StandardErrorPath</key><string>{}</string>\n\
 </dict>\n\
 </plist>\n",
+        xml_escape(label),
         xml_escape(&daemon_log_path(paths).display().to_string()),
         xml_escape(&daemon_log_path(paths).display().to_string())
     )
 }
 
-fn systemd_service(paths: &AppPaths, arguments: &[String]) -> String {
+fn systemd_service(
+    paths: &AppPaths,
+    arguments: &[String],
+    environment: &[(String, String)],
+) -> String {
     let command = arguments
         .iter()
         .map(|value| shell_quote(value))
         .collect::<Vec<_>>()
         .join(" ");
+    let environment = environment
+        .iter()
+        .map(|(key, value)| format!("Environment=\"{key}={}\"\n", systemd_escape(value)))
+        .collect::<String>();
     format!(
-        "[Unit]\nDescription=ClawGallery poll daemon\n\n[Service]\nExecStart={command}\nRestart=always\nStandardOutput=append:{}\nStandardError=append:{}\n\n[Install]\nWantedBy=default.target\n",
+        "[Unit]\nDescription=ClawGallery poll daemon\n\n[Service]\n{environment}ExecStart={command}\nRestart=always\nStandardOutput=append:{}\nStandardError=append:{}\n\n[Install]\nWantedBy=default.target\n",
         daemon_log_path(paths).display(),
         daemon_log_path(paths).display()
     )
@@ -1463,18 +1482,55 @@ fn systemd_service(paths: &AppPaths, arguments: &[String]) -> String {
 
 fn daemon_service_file() -> Result<PathBuf> {
     if let Some(dir) = env::var_os(DAEMON_DIR_ENV) {
-        return Ok(PathBuf::from(dir).join(format!("{DAEMON_LABEL}.plist")));
+        return Ok(PathBuf::from(dir).join(format!("{}.plist", daemon_label())));
     }
     if cfg!(target_os = "linux") {
         let dir = dirs::config_dir()
             .ok_or_else(|| anyhow!("could not resolve config directory"))?
             .join("systemd/user");
-        return Ok(dir.join("clawgallery-poll.service"));
+        return Ok(dir.join(format!("{}.service", daemon_label())));
     }
     let dir = dirs::home_dir()
         .ok_or_else(|| anyhow!("could not resolve home directory"))?
         .join("Library/LaunchAgents");
-    Ok(dir.join(format!("{DAEMON_LABEL}.plist")))
+    Ok(dir.join(format!("{}.plist", daemon_label())))
+}
+
+fn daemon_label() -> String {
+    env::var(DAEMON_LABEL_ENV).unwrap_or_else(|_| DAEMON_LABEL.to_string())
+}
+
+fn daemon_environment(paths: &AppPaths) -> Vec<(String, String)> {
+    let mut values = vec![(CONFIG_DIR_ENV.to_string(), paths.root.display().to_string())];
+    for key in [HEIC_CONVERTER_ENV, "OPENAI_API_KEY", "CODEX_HOME"] {
+        if let Ok(value) = env::var(key) {
+            values.push((key.to_string(), value));
+        }
+    }
+    values
+}
+
+fn daemon_systemd_unit_name(service_file: &Path) -> Result<String> {
+    service_file
+        .file_name()
+        .and_then(OsStr::to_str)
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("could not resolve daemon service name"))
+}
+
+fn launchd_environment(environment: &[(String, String)]) -> String {
+    let items = environment
+        .iter()
+        .map(|(key, value)| {
+            format!(
+                "    <key>{}</key><string>{}</string>",
+                xml_escape(key),
+                xml_escape(value)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("  <key>EnvironmentVariables</key>\n  <dict>\n{items}\n  </dict>\n")
 }
 
 fn daemon_log_path(paths: &AppPaths) -> PathBuf {
@@ -1527,6 +1583,10 @@ fn xml_escape(value: &str) -> String {
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn systemd_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn rename_no_clobber(source: &Path, target: &Path) -> io::Result<()> {
@@ -3140,10 +3200,7 @@ mod tests {
 
         handle.join().unwrap();
         assert_eq!(count.load(Ordering::SeqCst), 2);
-        assert_eq!(
-            value["output_text"].as_str().unwrap().contains("retried"),
-            true
-        );
+        assert!(value["output_text"].as_str().unwrap().contains("retried"));
     }
 
     #[test]

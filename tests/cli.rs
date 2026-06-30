@@ -168,6 +168,8 @@ fn daemon_install_status_and_uninstall_use_managed_service_file() {
     assert!(service.contains("run"));
     assert!(service.contains("--caption"));
     assert!(service.contains("--sync"));
+    assert!(service.contains("EnvironmentVariables"));
+    assert!(service.contains("CLAWGALLERY_CONFIG_DIR"));
 
     let status = assert_success(run_with_env(
         &config,
