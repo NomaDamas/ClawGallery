@@ -124,11 +124,11 @@ clawgallery folder add <path> [--recursive]
 clawgallery folder remove <id-or-path>
 clawgallery folder list
 clawgallery bootstrap [--folder <id>] [--path <path>] [--prune]
-clawgallery poll [--folder <id>] [--path <path>] [--once] [--interval <seconds>] [--prune] [--caption] [--sync] [--embedding-url <url>] [--vdr-model <model>] [--vdr-dimensions <n>]
-clawgallery caption [--missing] [--file <path>] [--dry-run] [--model <model>] [--provider <provider>] [--concurrency <n>]
+clawgallery poll [--folder <id>] [--path <path>] [--once] [--interval <seconds>] [--prune] [--caption] [--sync] [--embedding-url <url>] [--vdr-model <model>] [--vdr-dimensions <n>] [--max-retries <n>]
+clawgallery caption [--missing] [--file <path>] [--dry-run] [--model <model>] [--provider <provider>] [--concurrency <n>] [--max-retries <n>]
 clawgallery rename [--apply] [--dry-run] [--file <path>] [--style title|caption|date-title] [--force]
 clawgallery search [--mode keyword|embedding] <query...> [--limit <n>] [--json] [--case-sensitive] [--no-fuzzy] [--embedding-url <url>]
-clawgallery vdr sync [--prune] [--embedding-url <url>] [--model <model>] [--dimensions <n>]
+clawgallery vdr sync [--prune] [--embedding-url <url>] [--model <model>] [--dimensions <n>] [--max-retries <n>]
 clawgallery vdr serve [--backend mlx] [--host <host>] [--port <port>] [--model <model>] [--dimensions <n>] [--device auto|mps|cpu] [--python <path>] [--allow-remote]
 clawgallery vdr status [--json]
 clawgallery status

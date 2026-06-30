@@ -6,6 +6,31 @@ mod vdr_support;
 use vdr_support::{FakeEmbeddingServer, assert_success, image_id_for, run, write_caption};
 
 #[test]
+fn vdr_sync_retries_transient_429_then_succeeds() {
+    let server = FakeEmbeddingServer::start_with_statuses(vec![429, 200]);
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).expect("create images");
+    fs::write(images.join("retry.png"), b"retry image bytes").expect("write image");
+
+    assert_success(run(&config, &["init"], server.url()));
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", images.to_str().expect("utf8")],
+        server.url(),
+    ));
+
+    let synced = assert_success(run(
+        &config,
+        &["vdr", "sync", "--dimensions", "4"],
+        server.url(),
+    ));
+    assert!(synced.contains("indexed 1"), "got: {synced}");
+    assert_eq!(server.request_count(), 2);
+}
+
+#[test]
 fn vdr_late_interaction_ranks_with_multivector_maxsim() {
     // Given: a multi-vector (late-interaction) embedding server and two images.
     let server = FakeEmbeddingServer::start_multivector();

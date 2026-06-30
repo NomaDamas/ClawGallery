@@ -132,6 +132,9 @@ struct PollArgs {
     /// Override embedding dimensions for --sync.
     #[arg(long, default_value_t = vdr::DEFAULT_DIMENSIONS)]
     vdr_dimensions: usize,
+    /// Maximum retries for transient caption or VDR sync HTTP failures.
+    #[arg(long, default_value_t = vdr::DEFAULT_MAX_RETRIES)]
+    max_retries: usize,
 }
 
 #[derive(Debug, Args)]
@@ -154,6 +157,9 @@ struct CaptionArgs {
     /// Maximum caption requests in flight.
     #[arg(long, default_value_t = 4)]
     concurrency: usize,
+    /// Maximum retries for transient HTTP failures.
+    #[arg(long, default_value_t = vdr::DEFAULT_MAX_RETRIES)]
+    max_retries: usize,
 }
 
 #[derive(Debug, Args)]
@@ -397,6 +403,7 @@ fn build_provider(
     config: &AppConfig,
     cli_provider: Option<String>,
     cli_model: Option<String>,
+    max_retries: usize,
 ) -> Result<Provider> {
     let provider_name = cli_provider.unwrap_or_else(|| config.provider.clone());
     let model = cli_model.unwrap_or_else(|| config.model.clone());
@@ -404,14 +411,21 @@ fn build_provider(
         "gemini" => {
             let api_key = env::var("GEMINI_API_KEY")
                 .with_context(|| "missing GEMINI_API_KEY environment variable")?;
-            Ok(Provider::Gemini(GeminiProvider::new(api_key, model)))
+            Ok(Provider::Gemini(GeminiProvider::new(
+                api_key,
+                model,
+                max_retries,
+            )))
         }
         _ => {
             let auth = Auth::discover()?;
             let base_url = env::var("OPENAI_BASE_URL")
                 .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
             Ok(Provider::OpenAiCompat(OpenAiCompatProvider::new(
-                auth, model, base_url,
+                auth,
+                model,
+                base_url,
+                max_retries,
             )))
         }
     }
@@ -608,6 +622,7 @@ fn cmd_poll(paths: &AppPaths, args: PollArgs) -> Result<()> {
                     model: None,
                     provider: None,
                     concurrency: 4,
+                    max_retries: args.max_retries,
                 },
             )
         {
@@ -625,6 +640,7 @@ fn cmd_poll(paths: &AppPaths, args: PollArgs) -> Result<()> {
                     embedding_url: args.embedding_url.clone(),
                     model: args.vdr_model.clone(),
                     dimensions: args.vdr_dimensions,
+                    max_retries: args.max_retries,
                 },
             )
         {
@@ -684,7 +700,7 @@ fn cmd_caption(paths: &AppPaths, args: CaptionArgs) -> Result<()> {
         }
         return Ok(());
     }
-    let provider = build_provider(&config, args.provider, args.model.clone())?;
+    let provider = build_provider(&config, args.provider, args.model.clone(), args.max_retries)?;
     for result in bounded_concurrent_map(images, args.concurrency, |image| {
         caption_image_job(&provider, image)
     })? {
@@ -1683,14 +1699,16 @@ struct OpenAiCompatProvider {
     auth: Auth,
     model: String,
     base_url: String,
+    max_retries: usize,
 }
 
 impl OpenAiCompatProvider {
-    fn new(auth: Auth, model: String, base_url: String) -> Self {
+    fn new(auth: Auth, model: String, base_url: String, max_retries: usize) -> Self {
         Self {
             auth,
             model,
             base_url,
+            max_retries,
         }
     }
 
@@ -1714,13 +1732,16 @@ impl OpenAiCompatProvider {
             "max_output_tokens": 500
         });
         let url = format!("{}/responses", self.base_url.trim_end_matches('/'));
-        let response: Value = reqwest::blocking::Client::new()
-            .post(url)
-            .bearer_auth(&self.auth.bearer)
-            .json(&request)
-            .send()?
-            .error_for_status()?
-            .json()?;
+        let client = reqwest::blocking::Client::new();
+        let response = send_json_with_retry(
+            || {
+                client
+                    .post(&url)
+                    .bearer_auth(&self.auth.bearer)
+                    .json(&request)
+            },
+            self.max_retries,
+        )?;
         parse_caption_response(&response)
     }
 
@@ -1736,13 +1757,16 @@ impl OpenAiCompatProvider {
             "max_output_tokens": 50
         });
         let url = format!("{}/responses", self.base_url.trim_end_matches('/'));
-        let response: Value = reqwest::blocking::Client::new()
-            .post(url)
-            .bearer_auth(&self.auth.bearer)
-            .json(&request)
-            .send()?
-            .error_for_status()?
-            .json()?;
+        let client = reqwest::blocking::Client::new();
+        let response = send_json_with_retry(
+            || {
+                client
+                    .post(&url)
+                    .bearer_auth(&self.auth.bearer)
+                    .json(&request)
+            },
+            self.max_retries,
+        )?;
         parse_stem_classification(&response)
     }
 }
@@ -1751,14 +1775,16 @@ struct GeminiProvider {
     api_key: String,
     model: String,
     base_url: String,
+    max_retries: usize,
 }
 
 impl GeminiProvider {
-    fn new(api_key: String, model: String) -> Self {
+    fn new(api_key: String, model: String, max_retries: usize) -> Self {
         Self {
             api_key,
             model,
             base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
+            max_retries,
         }
     }
 
@@ -1778,12 +1804,8 @@ impl GeminiProvider {
             "{}/models/{}:generateContent?key={}",
             self.base_url, self.model, self.api_key
         );
-        let response: Value = reqwest::blocking::Client::new()
-            .post(&url)
-            .json(&request)
-            .send()?
-            .error_for_status()?
-            .json()?;
+        let client = reqwest::blocking::Client::new();
+        let response = send_json_with_retry(|| client.post(&url).json(&request), self.max_retries)?;
         let text = gemini_text(&response)?;
         parse_caption_text(&text)
     }
@@ -1798,15 +1820,59 @@ impl GeminiProvider {
             "{}/models/{}:generateContent?key={}",
             self.base_url, self.model, self.api_key
         );
-        let response: Value = reqwest::blocking::Client::new()
-            .post(&url)
-            .json(&request)
-            .send()?
-            .error_for_status()?
-            .json()?;
+        let client = reqwest::blocking::Client::new();
+        let response = send_json_with_retry(|| client.post(&url).json(&request), self.max_retries)?;
         let text = gemini_text(&response)?;
         parse_stem_classification_text(&text)
     }
+}
+
+fn send_json_with_retry<F>(mut request: F, max_retries: usize) -> Result<Value>
+where
+    F: FnMut() -> reqwest::blocking::RequestBuilder,
+{
+    for attempt in 0..=max_retries {
+        match request().send() {
+            Ok(response) => {
+                let status = response.status();
+                let retry_after = retry_after_delay(response.headers());
+                if !is_retryable_status(status) {
+                    return Ok(response.error_for_status()?.json()?);
+                }
+                if attempt == max_retries {
+                    return Ok(response.error_for_status()?.json()?);
+                }
+                thread::sleep(retry_after.unwrap_or_else(|| retry_delay(attempt)));
+            }
+            Err(err) => {
+                if attempt == max_retries {
+                    return Err(err.into());
+                }
+                thread::sleep(retry_delay(attempt));
+            }
+        }
+    }
+    bail!("retry loop exhausted")
+}
+
+fn is_retryable_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+fn retry_after_delay(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .parse::<u64>()
+        .ok()
+        .map(Duration::from_secs)
+}
+
+fn retry_delay(attempt: usize) -> Duration {
+    let base = 25_u64.saturating_mul(1_u64 << attempt.min(6));
+    let jitter = ((attempt as u64 + 1) * 17) % 23;
+    Duration::from_millis(base + jitter)
 }
 
 fn gemini_text(response: &Value) -> Result<String> {
@@ -2276,6 +2342,93 @@ mod tests {
 
         assert_eq!(outputs, vec![10, 20, 30, 40]);
         assert_eq!(max_in_flight.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn retry_policy_only_retries_transient_statuses() {
+        assert!(is_retryable_status(reqwest::StatusCode::TOO_MANY_REQUESTS));
+        assert!(is_retryable_status(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR
+        ));
+        assert!(!is_retryable_status(reqwest::StatusCode::BAD_REQUEST));
+        assert!(!is_retryable_status(reqwest::StatusCode::UNAUTHORIZED));
+    }
+
+    #[test]
+    fn retry_after_header_parses_seconds() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "2".parse().unwrap());
+        assert_eq!(retry_after_delay(&headers), Some(Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn caption_http_retry_retries_transient_429_then_succeeds() {
+        use std::{
+            io::{BufRead, BufReader, Read, Write},
+            net::{TcpListener, TcpStream},
+            sync::{
+                Arc,
+                atomic::{AtomicUsize, Ordering},
+            },
+        };
+
+        fn serve_once(mut stream: TcpStream, count: &AtomicUsize) {
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut content_len = 0_usize;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap() == 0 {
+                    return;
+                }
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':')
+                    && name.eq_ignore_ascii_case("content-length")
+                {
+                    content_len = value.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0_u8; content_len];
+            reader.read_exact(&mut body).unwrap();
+            let request_number = count.fetch_add(1, Ordering::SeqCst) + 1;
+            if request_number == 1 {
+                let body = b"{\"error\":\"retry\"}";
+                let reply = format!(
+                    "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    String::from_utf8_lossy(body)
+                );
+                stream.write_all(reply.as_bytes()).unwrap();
+                return;
+            }
+            let body = b"{\"output_text\":\"{\\\"title\\\":\\\"ok\\\",\\\"description\\\":\\\"retried\\\"}\"}";
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                String::from_utf8_lossy(body)
+            );
+            stream.write_all(reply.as_bytes()).unwrap();
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let count = Arc::new(AtomicUsize::new(0));
+        let server_count = Arc::clone(&count);
+        let handle = thread::spawn(move || {
+            for stream in listener.incoming().flatten().take(2) {
+                serve_once(stream, &server_count);
+            }
+        });
+        let client = reqwest::blocking::Client::new();
+        let value = send_json_with_retry(|| client.post(&url).json(&json!({})), 3).unwrap();
+
+        handle.join().unwrap();
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            value["output_text"].as_str().unwrap().contains("retried"),
+            true
+        );
     }
 
     #[test]

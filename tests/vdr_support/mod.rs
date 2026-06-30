@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Output},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     thread::{self, JoinHandle},
@@ -36,6 +36,7 @@ pub(crate) fn assert_success(output: Output) -> String {
 pub(crate) struct FakeEmbeddingServer {
     url: String,
     requests: Arc<AtomicUsize>,
+    _statuses: Arc<Mutex<Vec<u16>>>,
     _handle: JoinHandle<()>,
 }
 
@@ -46,6 +47,10 @@ impl FakeEmbeddingServer {
 
     pub(crate) fn start_with_response_model(model: &'static str) -> Self {
         Self::start_with_mode_and_response_model(false, Some(model))
+    }
+
+    pub(crate) fn start_with_statuses(statuses: Vec<u16>) -> Self {
+        Self::start_with_mode_response_model_and_statuses(false, None, statuses)
     }
 
     #[allow(dead_code)]
@@ -61,6 +66,14 @@ impl FakeEmbeddingServer {
         multivector: bool,
         response_model: Option<&'static str>,
     ) -> Self {
+        Self::start_with_mode_response_model_and_statuses(multivector, response_model, Vec::new())
+    }
+
+    fn start_with_mode_response_model_and_statuses(
+        multivector: bool,
+        response_model: Option<&'static str>,
+        statuses: Vec<u16>,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake embedding server");
         let url = format!(
             "http://{}",
@@ -68,15 +81,26 @@ impl FakeEmbeddingServer {
         );
         let requests = Arc::new(AtomicUsize::new(0));
         let request_count = Arc::clone(&requests);
+        let statuses = Arc::new(Mutex::new(statuses));
+        let response_statuses = Arc::clone(&statuses);
         let handle = thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 request_count.fetch_add(1, Ordering::SeqCst);
-                handle_request(stream, multivector, response_model);
+                let status = {
+                    let mut statuses = response_statuses.lock().expect("status sequence lock");
+                    if statuses.is_empty() {
+                        200
+                    } else {
+                        statuses.remove(0)
+                    }
+                };
+                handle_request(stream, multivector, response_model, status);
             }
         });
         Self {
             url,
             requests,
+            _statuses: statuses,
             _handle: handle,
         }
     }
@@ -132,7 +156,12 @@ fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_clawgallery"))
 }
 
-fn handle_request(mut stream: TcpStream, multivector: bool, response_model: Option<&'static str>) {
+fn handle_request(
+    mut stream: TcpStream,
+    multivector: bool,
+    response_model: Option<&'static str>,
+    status: u16,
+) {
     let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
     let mut content_len = 0_usize;
     loop {
@@ -152,6 +181,16 @@ fn handle_request(mut stream: TcpStream, multivector: bool, response_model: Opti
     let mut body = vec![0_u8; content_len];
     reader.read_exact(&mut body).expect("read request body");
     let request: serde_json::Value = serde_json::from_slice(&body).expect("json request");
+    if status != 200 {
+        let body = format!("{{\"error\":\"status {status}\"}}");
+        let reply = format!(
+            "HTTP/1.1 {status} Test Status\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(reply.as_bytes()).expect("write response");
+        return;
+    }
     let inputs = request["inputs"].as_array().expect("inputs array");
     let model = request["model"].as_str().unwrap_or("test-model");
     let response_model = response_model.unwrap_or(model);

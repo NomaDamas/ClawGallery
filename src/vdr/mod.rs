@@ -9,6 +9,7 @@ mod search;
 mod serve;
 mod store;
 
+pub(crate) use client::DEFAULT_MAX_RETRIES;
 pub(crate) use search::cmd_embedding_search;
 
 const DEFAULT_EMBEDDING_URL: &str = "http://127.0.0.1:8765";
@@ -40,6 +41,8 @@ pub(crate) struct VdrSyncArgs {
     pub(crate) model: String,
     #[arg(long, default_value_t = DEFAULT_DIMENSIONS)]
     pub(crate) dimensions: usize,
+    #[arg(long, default_value_t = client::DEFAULT_MAX_RETRIES)]
+    pub(crate) max_retries: usize,
 }
 
 #[derive(Debug, Args)]
@@ -145,7 +148,8 @@ pub(crate) fn cmd_sync(paths: &AppPaths, args: VdrSyncArgs) -> Result<()> {
         })
         .collect();
     let url = client::resolve_embedding_url(args.embedding_url.as_deref());
-    let response = client::embed(&url, &args.model, args.dimensions, inputs)?;
+    let response =
+        client::embed_with_retries(&url, &args.model, args.dimensions, inputs, args.max_retries)?;
     if response.embeddings.len() != pending.len() {
         anyhow::bail!(
             "embedding server returned {} embedding(s) for {} input(s)",
