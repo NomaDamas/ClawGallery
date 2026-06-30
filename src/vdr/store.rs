@@ -122,6 +122,14 @@ pub(super) fn deactivate_existing_kind(
     Ok(())
 }
 
+pub(super) fn deactivate_image_vectors(conn: &Connection, image_id: &str) -> Result<()> {
+    conn.execute(
+        "update vdr_embeddings set active = 0 where image_id = ?1",
+        params![image_id],
+    )?;
+    Ok(())
+}
+
 pub(super) fn prune_inactive_vectors(
     conn: &Connection,
     active_images: &[ImageRecord],

@@ -112,6 +112,14 @@ pub(crate) fn cmd_vdr(paths: &AppPaths, args: VdrArgs) -> Result<()> {
     }
 }
 
+pub(crate) fn deactivate_image_vectors(paths: &AppPaths, image_id: &str) -> Result<()> {
+    if !paths.vdr_db.exists() {
+        return Ok(());
+    }
+    let conn = store::open_store(paths)?;
+    store::deactivate_image_vectors(&conn, image_id)
+}
+
 fn cmd_serve(args: VdrServeArgs) -> Result<()> {
     serve::serve(serve::ServeArgs {
         backend: args.backend,

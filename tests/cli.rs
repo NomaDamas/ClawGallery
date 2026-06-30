@@ -739,6 +739,109 @@ fn search_and_status_ignore_pruned_records() {
     );
 }
 
+#[test]
+fn forget_file_deactivates_without_deleting_and_removes_from_search_status() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).unwrap();
+    let image = images.join("forget-me.png");
+    fs::write(&image, b"still on disk").unwrap();
+
+    assert_success(run(&config, &["init"]));
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", images.to_str().unwrap()],
+    ));
+    let canonical = image.canonicalize().unwrap();
+
+    let before = assert_success(run(&config, &["search", "forget-me"]));
+    assert!(before.contains("forget-me.png"));
+
+    let forgot = assert_success(run(
+        &config,
+        &["forget", "--file", canonical.to_str().unwrap()],
+    ));
+    assert!(
+        forgot.contains("forgot 1 image"),
+        "forget should summarize the deactivation, got: {forgot}"
+    );
+    assert!(
+        image.exists(),
+        "forget without --delete must leave the file"
+    );
+
+    let status = assert_success(run(&config, &["status"]));
+    assert!(
+        status.contains("images: 0"),
+        "status should exclude forgotten images, got: {status}"
+    );
+    let after = assert_success(run(&config, &["search", "forget-me"]));
+    assert!(
+        !after.contains("forget-me.png"),
+        "forgotten image must not appear in search, got: {after}"
+    );
+
+    let records = read_jsonl(&config.join("images.jsonl"));
+    let path_records: Vec<_> = records
+        .iter()
+        .filter(|record| record["path"].as_str() == Some(canonical.to_str().unwrap()))
+        .collect();
+    assert_eq!(
+        path_records.len(),
+        2,
+        "forget must append a new image record"
+    );
+    let latest = path_records.last().unwrap();
+    assert_eq!(latest["active"], false);
+    assert!(latest["removed_at"].is_string());
+}
+
+#[test]
+fn forget_delete_removes_disk_file_and_untracks_image() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).unwrap();
+    let image = images.join("delete-me.png");
+    fs::write(&image, b"remove from disk").unwrap();
+
+    assert_success(run(&config, &["init"]));
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", images.to_str().unwrap()],
+    ));
+    let canonical = image.canonicalize().unwrap();
+
+    let forgot = assert_success(run(
+        &config,
+        &["forget", "--file", canonical.to_str().unwrap(), "--delete"],
+    ));
+    assert!(forgot.contains("deleted"));
+    assert!(!image.exists(), "forget --delete must remove the disk file");
+
+    let status = assert_success(run(&config, &["status"]));
+    assert!(status.contains("images: 0"));
+}
+
+#[test]
+fn forget_missing_path_reports_clear_error() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    assert_success(run(&config, &["init"]));
+
+    let missing = temp.path().join("missing.png");
+    let output = run(&config, &["forget", "--file", missing.to_str().unwrap()]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no active image matched"),
+        "missing path should report a clear error, got: {stderr}"
+    );
+    assert!(stderr.contains("missing.png"));
+}
+
 fn inject_caption(
     config: &Path,
     image_path: &Path,

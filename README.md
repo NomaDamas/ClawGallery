@@ -83,8 +83,9 @@ State is split across three append-only JSONL event logs joined by `image_id`:
 - `bootstrap` writes new `ImageRecord`s to `images.jsonl`. Pass `--prune` to also append `active=false` records for files that have disappeared from disk.
 - `caption` writes one `CaptionRecord` per successful run to `captions.jsonl`.
 - `rename --apply` writes a `RenameRecord` to `renames.jsonl` and appends a fresh `ImageRecord` with the new `path` (preserving the original `id` and `sha256`).
+- `forget --file <path>` appends an `active=false` `ImageRecord` for one tracked image; add `--delete` to remove the disk file first.
 
-Each downstream command (`search`, `status`, `caption`, `rename`) treats the latest record per path as authoritative and ignores `active=false` (pruned) entries.
+Each downstream command (`search`, `status`, `caption`, `rename`) treats the latest record per path as authoritative and ignores `active=false` entries.
 
 ## Visual model auth
 
@@ -127,6 +128,7 @@ clawgallery bootstrap [--folder <id>] [--path <path>] [--prune]
 clawgallery poll [--folder <id>] [--path <path>] [--once] [--interval <seconds>] [--prune] [--caption] [--sync] [--embedding-url <url>] [--vdr-model <model>] [--vdr-dimensions <n>] [--max-retries <n>]
 clawgallery caption [--missing] [--file <path>] [--dry-run] [--model <model>] [--provider <provider>] [--concurrency <n>] [--max-retries <n>]
 clawgallery rename [--apply] [--dry-run] [--file <path>] [--style title|caption|date-title] [--force]
+clawgallery forget --file <path> [--delete]
 clawgallery search [--mode keyword|embedding] <query...> [--limit <n>] [--json] [--case-sensitive] [--no-fuzzy] [--embedding-url <url>]
 clawgallery vdr sync [--prune] [--embedding-url <url>] [--model <model>] [--dimensions <n>] [--max-retries <n>]
 clawgallery vdr serve [--backend mlx] [--host <host>] [--port <port>] [--model <model>] [--dimensions <n>] [--device auto|mps|cpu] [--python <path>] [--allow-remote]

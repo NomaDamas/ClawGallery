@@ -272,6 +272,42 @@ fn vdr_sync_prunes_deleted_and_indexes_added_images() {
 }
 
 #[test]
+fn forget_deactivates_vdr_vectors_for_image() {
+    let server = FakeEmbeddingServer::start();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).expect("create images");
+    let image = images.join("dog.png");
+    fs::write(&image, b"dog image bytes").expect("write dog image");
+    assert_success(run(&config, &["init"], server.url()));
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", images.to_str().expect("utf8")],
+        server.url(),
+    ));
+    let (dog_id, dog_path) = image_id_for(&config, "dog.png");
+    write_caption(&config, &dog_id, &dog_path, "Dog", "puppy");
+    assert_success(run(
+        &config,
+        &["vdr", "sync", "--dimensions", "4"],
+        server.url(),
+    ));
+
+    let forgot = assert_success(run(
+        &config,
+        &["forget", "--file", dog_path.to_str().expect("utf8")],
+        server.url(),
+    ));
+    let status = assert_success(run(&config, &["vdr", "status", "--json"], server.url()));
+
+    assert!(forgot.contains("forgot 1 image"), "got: {forgot}");
+    let status: serde_json::Value = serde_json::from_str(&status).expect("status json");
+    assert_eq!(status["active_images"], 0);
+    assert_eq!(status["active_vectors"], 0);
+}
+
+#[test]
 fn vdr_sync_second_run_skips_already_indexed_images() {
     // Given: one image has already been synced.
     let server = FakeEmbeddingServer::start();

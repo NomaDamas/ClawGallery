@@ -59,6 +59,7 @@ enum Command {
     Caption(CaptionArgs),
     /// Safely rename images from generated titles/captions.
     Rename(RenameArgs),
+    Forget(ForgetArgs),
     /// Search local JSONL metadata by keyword.
     Search(SearchArgs),
     /// Manage local visual document retrieval embeddings.
@@ -179,6 +180,14 @@ struct RenameArgs {
     /// Rename even when the current filename looks human-meaningful.
     #[arg(long)]
     force: bool,
+}
+
+#[derive(Debug, Args)]
+struct ForgetArgs {
+    #[arg(long)]
+    file: PathBuf,
+    #[arg(long)]
+    delete: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -458,6 +467,7 @@ fn run() -> Result<()> {
         Command::Poll(args) => cmd_poll(&paths, args),
         Command::Caption(args) => cmd_caption(&paths, args),
         Command::Rename(args) => cmd_rename(&paths, args),
+        Command::Forget(args) => cmd_forget(&paths, args),
         Command::Search(args) => cmd_search(&paths, args),
         Command::Vdr(args) => vdr::cmd_vdr(&paths, args),
         Command::Status => cmd_status(&paths),
@@ -898,6 +908,33 @@ fn cmd_rename(paths: &AppPaths, args: RenameArgs) -> Result<()> {
         );
     } else if skipped > 0 {
         println!("(would skip {skipped} meaningful-looking name(s); use --force to override)");
+    }
+    Ok(())
+}
+
+fn cmd_forget(paths: &AppPaths, args: ForgetArgs) -> Result<()> {
+    paths.ensure()?;
+    let requested = fs::canonicalize(&args.file).unwrap_or_else(|_| args.file.clone());
+    let image = latest_images(paths)?
+        .into_iter()
+        .find(|image| image.path == requested)
+        .ok_or_else(|| anyhow!("no active image matched {}", args.file.display()))?;
+
+    let deleted = if args.delete && image.path.exists() {
+        fs::remove_file(&image.path)
+            .with_context(|| format!("failed to delete {}", image.path.display()))?;
+        true
+    } else {
+        false
+    };
+
+    deactivate_image_record(paths, &image)?;
+    vdr::deactivate_image_vectors(paths, &image.id)
+        .with_context(|| format!("failed to deactivate VDR vectors for image {}", image.id))?;
+    if deleted {
+        println!("forgot 1 image (deleted) {}", image.path.display());
+    } else {
+        println!("forgot 1 image {}", image.path.display());
     }
     Ok(())
 }
