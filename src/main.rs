@@ -6,15 +6,14 @@ use nucleo_matcher::{
     Config, Matcher, Utf32Str,
     pattern::{CaseMatching, Normalization, Pattern},
 };
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     env,
     ffi::OsStr,
-    fs::{self, File, OpenOptions},
-    io::{self, BufRead, BufReader, Write},
+    fs::{self, File},
+    io,
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, ExitCode},
     thread,
@@ -24,12 +23,19 @@ use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
+mod state;
 mod vdr;
+
+pub(crate) use state::{
+    AppConfig, AppPaths, CaptionRecord, FolderRecord, ImageRecord, active_folders, append_jsonl,
+    build_image_record, is_image_path, latest_captions, latest_captions_by_path, latest_images,
+    latest_images_by_path, latest_images_refreshing_changed_files, read_config, read_jsonl,
+    write_json_pretty,
+};
 
 const APP_DIR_NAME: &str = "clawgallery";
 const DEFAULT_MODEL: &str = "gpt-4.1-mini";
 const DEFAULT_FILENAME_LIMIT_BYTES: usize = 240;
-const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "avif", "gif", "heic", "heif"];
 const HEIC_CONVERTER_ENV: &str = "CLAWGALLERY_HEIC_CONVERTER";
 const DAEMON_DIR_ENV: &str = "CLAWGALLERY_DAEMON_DIR";
 const DAEMON_LABEL_ENV: &str = "CLAWGALLERY_DAEMON_LABEL";
@@ -317,128 +323,6 @@ enum SkillCommand {
     Print,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct AppPaths {
-    pub(crate) root: PathBuf,
-    config: PathBuf,
-    folders: PathBuf,
-    images: PathBuf,
-    captions: PathBuf,
-    renames: PathBuf,
-    errors: PathBuf,
-    pub(crate) vdr_db: PathBuf,
-}
-
-impl AppPaths {
-    fn resolve() -> Result<Self> {
-        let root = if let Ok(path) = env::var("CLAWGALLERY_CONFIG_DIR") {
-            PathBuf::from(path)
-        } else {
-            dirs::config_dir()
-                .ok_or_else(|| anyhow!("could not resolve user config directory"))?
-                .join(APP_DIR_NAME)
-        };
-        Ok(Self {
-            config: root.join("config.json"),
-            folders: root.join("folders.jsonl"),
-            images: root.join("images.jsonl"),
-            captions: root.join("captions.jsonl"),
-            renames: root.join("renames.jsonl"),
-            errors: root.join("errors.jsonl"),
-            vdr_db: root.join("vdr.sqlite3"),
-            root,
-        })
-    }
-
-    pub(crate) fn ensure(&self) -> Result<()> {
-        fs::create_dir_all(&self.root)
-            .with_context(|| format!("failed to create {}", self.root.display()))
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct AppConfig {
-    #[serde(default = "default_model")]
-    model: String,
-    #[serde(default = "default_provider_str")]
-    provider: String,
-    #[serde(default = "default_filename_limit")]
-    filename_limit_bytes: usize,
-}
-
-fn default_model() -> String {
-    env::var("CLAWGALLERY_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string())
-}
-
-fn default_provider_str() -> String {
-    "openai-compatible".to_string()
-}
-
-fn default_filename_limit() -> usize {
-    DEFAULT_FILENAME_LIMIT_BYTES
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            model: default_model(),
-            provider: default_provider_str(),
-            filename_limit_bytes: default_filename_limit(),
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct FolderRecord {
-    id: String,
-    path: PathBuf,
-    recursive: bool,
-    active: bool,
-    created_at: DateTime<Utc>,
-    removed_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub(crate) struct ImageRecord {
-    pub(crate) id: String,
-    pub(crate) path: PathBuf,
-    original_path: PathBuf,
-    pub(crate) sha256: String,
-    size: u64,
-    modified_at: Option<DateTime<Utc>>,
-    pub(crate) discovered_at: DateTime<Utc>,
-    extension: String,
-    #[serde(default = "default_active")]
-    pub(crate) active: bool,
-    #[serde(default)]
-    removed_at: Option<DateTime<Utc>>,
-}
-
-fn default_active() -> bool {
-    true
-}
-
-impl ImageRecord {
-    pub(crate) fn has_same_file_fingerprint(&self, other: &Self) -> bool {
-        self.sha256 == other.sha256
-            && self.size == other.size
-            && self.modified_at == other.modified_at
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub(crate) struct CaptionRecord {
-    pub(crate) image_id: String,
-    pub(crate) path: PathBuf,
-    pub(crate) title: String,
-    pub(crate) description: String,
-    model: String,
-    provider: String,
-    created_at: DateTime<Utc>,
-    #[serde(default)]
-    filename_meaningful: Option<bool>,
-}
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct RenameRecord {
     image_id: Option<String>,
@@ -571,6 +455,12 @@ fn run() -> Result<()> {
 }
 
 fn cmd_init(paths: &AppPaths) -> Result<()> {
+    ensure_state_files(paths)?;
+    println!("initialized {}", paths.root.display());
+    Ok(())
+}
+
+fn ensure_state_files(paths: &AppPaths) -> Result<()> {
     paths.ensure()?;
     if !paths.config.exists() {
         write_json_pretty(&paths.config, &AppConfig::default())?;
@@ -586,12 +476,11 @@ fn cmd_init(paths: &AppPaths) -> Result<()> {
             File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
         }
     }
-    println!("initialized {}", paths.root.display());
     Ok(())
 }
 
 fn cmd_folder_add(paths: &AppPaths, args: FolderAddArgs) -> Result<()> {
-    cmd_init(paths)?;
+    ensure_state_files(paths)?;
     let canonical = canonicalize_existing_dir(&args.path)?;
     if active_folders(paths)?
         .iter()
@@ -650,10 +539,7 @@ struct BootstrapStats {
 }
 
 fn cmd_bootstrap(paths: &AppPaths, args: &IngestArgs) -> Result<BootstrapStats> {
-    paths.ensure()?;
-    if !paths.config.exists() {
-        write_json_pretty(&paths.config, &AppConfig::default())?;
-    }
+    ensure_state_files(paths)?;
     let existing = latest_images_by_path(paths)?;
     let mut seen_paths: HashSet<PathBuf> = HashSet::new();
     let mut ingested = 0;
@@ -701,6 +587,9 @@ fn prune_missing(paths: &AppPaths, active_images: &HashMap<PathBuf, ImageRecord>
 }
 
 fn cmd_poll(paths: &AppPaths, args: PollArgs) -> Result<()> {
+    if args.interval == 0 {
+        bail!("--interval must be at least 1");
+    }
     loop {
         let stats = cmd_bootstrap(paths, &args.ingest)?;
         println!(
@@ -752,7 +641,7 @@ fn cmd_poll(paths: &AppPaths, args: PollArgs) -> Result<()> {
         if args.once {
             break;
         }
-        thread::sleep(Duration::from_secs(args.interval.max(1)));
+        thread::sleep(Duration::from_secs(args.interval));
     }
     Ok(())
 }
@@ -771,6 +660,9 @@ fn resolve_model(cli_model: Option<&str>, config_model: &str) -> String {
 
 fn cmd_caption(paths: &AppPaths, args: CaptionArgs) -> Result<()> {
     paths.ensure()?;
+    if args.concurrency == 0 {
+        bail!("--concurrency must be at least 1");
+    }
     let config = read_config(paths)?;
     let effective_provider = resolve_provider(args.provider.as_deref(), &config.provider);
     let effective_model = resolve_model(args.model.as_deref(), &config.model);
@@ -988,11 +880,6 @@ fn cmd_rename(paths: &AppPaths, args: RenameArgs) -> Result<()> {
             }
             println!("renamed {} -> {}", image.path.display(), target.display());
         } else {
-            if let Err(err) = append_jsonl(&paths.renames, &record) {
-                log_error(paths, "rename", err);
-                failed += 1;
-                continue;
-            }
             println!("dry-run {} -> {}", image.path.display(), target.display());
         }
         renamed += 1;
@@ -1043,7 +930,6 @@ fn cmd_rename_undo(paths: &AppPaths, args: RenameArgs) -> Result<()> {
             created_at: Utc::now(),
         };
         if dry_run {
-            append_jsonl(&paths.renames, &undo_record)?;
             println!(
                 "would undo {} -> {}",
                 record.to.display(),
@@ -1135,6 +1021,9 @@ fn cmd_forget(paths: &AppPaths, args: ForgetArgs) -> Result<()> {
 
 fn cmd_dedup(paths: &AppPaths, args: DedupArgs) -> Result<()> {
     paths.ensure()?;
+    if args.exact && args.similar {
+        bail!("--exact and --similar cannot be used together");
+    }
     if !(0.0..=1.0).contains(&args.threshold) {
         bail!("--threshold must be between 0 and 1");
     }
@@ -2013,6 +1902,9 @@ fn cmd_search(paths: &AppPaths, args: SearchArgs) -> Result<()> {
     if args.keywords.is_empty() {
         bail!("provide at least one keyword");
     }
+    if args.limit == 0 {
+        bail!("--limit must be at least 1");
+    }
     let query = nfc(&args.keywords.join(" "));
     let captions = latest_captions_by_path(paths)?;
     let images = latest_images(paths)?;
@@ -2121,7 +2013,8 @@ fn cmd_skill_path(paths: &AppPaths) -> Result<()> {
 }
 
 fn cmd_status(paths: &AppPaths) -> Result<()> {
-    let config = read_config(paths).unwrap_or_default();
+    let config =
+        read_config(paths).with_context(|| format!("failed to read {}", paths.config.display()))?;
     println!("config_dir: {}", paths.root.display());
     println!("provider: {}", config.provider);
     println!("model: {}", config.model);
@@ -2131,129 +2024,22 @@ fn cmd_status(paths: &AppPaths) -> Result<()> {
     Ok(())
 }
 
-fn read_config(paths: &AppPaths) -> Result<AppConfig> {
-    if paths.config.exists() {
-        let raw = fs::read_to_string(&paths.config)?;
-        Ok(serde_json::from_str(&raw)?)
-    } else {
-        Ok(AppConfig::default())
-    }
-}
-
-fn write_json_pretty<T: Serialize>(path: &Path, value: &T) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(path, serde_json::to_string_pretty(value)? + "\n")?;
-    Ok(())
-}
-
-fn append_jsonl<T: Serialize>(path: &Path, value: &T) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    writeln!(file, "{}", serde_json::to_string(value)?)?;
-    Ok(())
-}
-
-fn read_jsonl<T: DeserializeOwned>(path: &Path) -> Result<Vec<T>> {
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let file = File::open(path)?;
-    let mut records = Vec::new();
-    for line in BufReader::new(file).lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        if let Ok(record) = serde_json::from_str(&line) {
-            records.push(record);
-        }
-    }
-    Ok(records)
-}
-
-fn active_folders(paths: &AppPaths) -> Result<Vec<FolderRecord>> {
-    let mut by_id: HashMap<String, FolderRecord> = HashMap::new();
-    for folder in read_jsonl::<FolderRecord>(&paths.folders)? {
-        by_id.insert(folder.id.clone(), folder);
-    }
-    let mut folders: Vec<_> = by_id.into_values().filter(|folder| folder.active).collect();
-    folders.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(folders)
-}
-
-pub(crate) fn latest_images(paths: &AppPaths) -> Result<Vec<ImageRecord>> {
-    let mut sequence: HashMap<PathBuf, usize> = HashMap::new();
-    for (index, image) in read_jsonl::<ImageRecord>(&paths.images)?
-        .into_iter()
-        .enumerate()
-    {
-        sequence.insert(image.path.clone(), index);
-    }
-    let mut images: Vec<ImageRecord> = latest_images_by_path(paths)?.into_values().collect();
-    images.sort_by_key(|image| sequence[&image.path]);
-    Ok(images)
-}
-
-pub(crate) fn latest_images_refreshing_changed_files(
-    paths: &AppPaths,
-) -> Result<(Vec<ImageRecord>, bool)> {
-    let mut images = latest_images(paths)?;
-    let mut refreshed = false;
-    for image in &mut images {
-        if !image.path.exists() {
-            continue;
-        }
-        let current = build_image_record(&image.path)?;
-        if image.has_same_file_fingerprint(&current) {
-            continue;
-        }
-        append_jsonl(&paths.images, &current)?;
-        *image = current;
-        refreshed = true;
-    }
-    Ok((images, refreshed))
-}
-
-fn latest_images_by_path(paths: &AppPaths) -> Result<HashMap<PathBuf, ImageRecord>> {
-    Ok(all_latest_images_by_path(paths)?
-        .into_iter()
-        .filter(|(_, image)| image.active)
-        .collect())
-}
-
-fn all_latest_images_by_path(paths: &AppPaths) -> Result<HashMap<PathBuf, ImageRecord>> {
-    let mut images = HashMap::new();
-    for image in read_jsonl::<ImageRecord>(&paths.images)? {
-        images.insert(image.path.clone(), image);
-    }
-    Ok(images)
-}
-
-fn latest_captions(paths: &AppPaths) -> Result<Vec<CaptionRecord>> {
-    Ok(latest_captions_by_path(paths)?.into_values().collect())
-}
-
-pub(crate) fn latest_captions_by_path(paths: &AppPaths) -> Result<HashMap<PathBuf, CaptionRecord>> {
-    let mut captions = HashMap::new();
-    for caption in read_jsonl::<CaptionRecord>(&paths.captions)? {
-        captions.insert(caption.path.clone(), caption);
-    }
-    Ok(captions)
-}
-
 fn candidate_image_paths(paths: &AppPaths, args: &IngestArgs) -> Result<Vec<PathBuf>> {
     let mut roots = Vec::new();
     if let Some(path) = &args.path {
         roots.push((path.clone(), true));
     } else {
+        let mut matched_folder = false;
         for folder in active_folders(paths)? {
             if args.folder.as_ref().is_none_or(|id| id == &folder.id) {
+                matched_folder = true;
                 roots.push((folder.path, folder.recursive));
             }
+        }
+        if let Some(folder_id) = &args.folder
+            && !matched_folder
+        {
+            bail!("no active folder matched '{folder_id}'");
         }
     }
     let mut images = Vec::new();
@@ -2284,35 +2070,6 @@ fn candidate_image_paths(paths: &AppPaths, args: &IngestArgs) -> Result<Vec<Path
     Ok(images)
 }
 
-fn build_image_record(path: &Path) -> Result<ImageRecord> {
-    let metadata =
-        fs::metadata(path).with_context(|| format!("metadata failed for {}", path.display()))?;
-    let modified_at = metadata.modified().ok().map(DateTime::<Utc>::from);
-    let extension = path
-        .extension()
-        .and_then(OsStr::to_str)
-        .unwrap_or_default()
-        .to_lowercase();
-    Ok(ImageRecord {
-        id: Uuid::new_v4().to_string(),
-        path: path.to_path_buf(),
-        original_path: path.to_path_buf(),
-        sha256: sha256_file(path)?,
-        size: metadata.len(),
-        modified_at,
-        discovered_at: Utc::now(),
-        extension,
-        active: true,
-        removed_at: None,
-    })
-}
-
-fn sha256_file(path: &Path) -> Result<String> {
-    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let digest = Sha256::digest(bytes);
-    Ok(format!("{digest:x}"))
-}
-
 fn canonicalize_existing_dir(path: &Path) -> Result<PathBuf> {
     let canonical =
         fs::canonicalize(path).with_context(|| format!("{} does not exist", path.display()))?;
@@ -2320,13 +2077,6 @@ fn canonicalize_existing_dir(path: &Path) -> Result<PathBuf> {
         bail!("{} is not a directory", canonical.display());
     }
     Ok(canonical)
-}
-
-fn is_image_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(OsStr::to_str)
-        .map(|ext| IMAGE_EXTENSIONS.contains(&ext.to_lowercase().as_str()))
-        .unwrap_or(false)
 }
 
 #[derive(Debug)]

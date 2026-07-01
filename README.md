@@ -149,7 +149,7 @@ clawgallery skill path|print
 
 ## Dedup
 
-`clawgallery dedup` reports duplicate candidates without deleting anything. With no mode flag it runs `--exact`, grouping active images that share the same `sha256`. Pass `--similar` to group active images whose VDR image embeddings meet `--threshold` (default `0.95`); run `clawgallery vdr sync` first so the local VDR index exists. `--json` emits one JSON object per group with a representative image and duplicate candidates including scores.
+`clawgallery dedup` reports duplicate candidates without deleting anything. With no mode flag it runs `--exact`, grouping active images that share the same `sha256`. Pass `--similar` to group active images whose VDR image embeddings meet `--threshold` (default `0.95`); `--exact` and `--similar` are mutually exclusive so each report has one clear grouping mode. Run `clawgallery vdr sync` first so the local VDR index exists. `--json` emits one JSON object per group with a representative image and duplicate candidates including scores.
 
 ## Search syntax
 
@@ -208,6 +208,8 @@ Set `CLAWGALLERY_VDR_EMBEDDING_URL` or pass `--embedding-url` to point the CLI a
 ## Rename safety
 
 Rename is dry-run by default. `--apply` is required to modify files. ClawGallery strips unsafe filename characters, preserves extensions, reserves suffix space for collisions, and refuses to overwrite existing files.
+
+Dry-run rename and undo previews are side-effect free: they do not move files and do not append `renames.jsonl` records. Only applied renames and applied undo operations are recorded in rename history.
 
 When `rename --apply` encounters a tracked path that no longer exists on disk (already renamed, deleted externally, etc.) it prints `would skip (missing source) <path>`, appends an `active=false` record so the entry stops following the live set, and continues with the rest of the batch. Per-image rename failures (collision, permission, IO) are logged to `errors.jsonl` and the run prints a final `renamed N, skipped M meaningful-looking name(s), failed K` summary instead of aborting on the first failure. API keys appearing in any error message (URL `?key=`, `Authorization: Bearer …`, raw `sk-…` / `AIza…` strings) are redacted before being written to `errors.jsonl` or stderr.
 
