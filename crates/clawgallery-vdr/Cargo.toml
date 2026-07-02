@@ -1,0 +1,18 @@
+[package]
+name = "clawgallery-vdr"
+version = "0.1.0"
+edition = "2024"
+description = "Reusable visual document retrieval indexing and search library for ClawGallery."
+license = "Apache-2.0"
+
+[dependencies]
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3.23"

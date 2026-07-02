@@ -1,6 +1,5 @@
-use crate::{AppPaths, CaptionRecord, ImageRecord};
+use crate::{CaptionDocument, ImageDocument, SearchConfig};
 use anyhow::{Result, bail};
-use serde_json::json;
 use std::{collections::HashMap, path::PathBuf};
 
 use super::{
@@ -9,27 +8,29 @@ use super::{
     store::{active_vectors, open_store},
 };
 
-#[derive(Debug)]
-struct EmbeddingSearchHit {
-    path: PathBuf,
-    title: String,
-    description: String,
-    score: f64,
-    matched_field: &'static str,
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EmbeddingSearchHit {
+    pub path: PathBuf,
+    pub title: String,
+    pub description: String,
+    pub score: f64,
+    pub matched_field: &'static str,
+    pub matched_atoms: Vec<String>,
+    pub source: &'static str,
 }
 
-pub(crate) fn cmd_embedding_search(
-    paths: &AppPaths,
+pub(super) fn embedding_search(
+    config: &SearchConfig,
     query: &str,
-    limit: usize,
-    json_output: bool,
-    embedding_url: Option<&str>,
-    images: Vec<ImageRecord>,
-    captions: HashMap<PathBuf, CaptionRecord>,
-) -> Result<()> {
-    let conn = open_store(paths)?;
-    let url = resolve_embedding_url(embedding_url);
-    let index_config = latest_active_index_config(&conn)?.unwrap_or_else(default_index_config);
+    images: Vec<ImageDocument>,
+    captions: Vec<CaptionDocument>,
+) -> Result<Vec<EmbeddingSearchHit>> {
+    let conn = open_store(&config.db_path)?;
+    let url = resolve_embedding_url(config.embedding_url.as_deref());
+    let index_config = match (config.model.clone(), config.dimensions) {
+        (Some(model), Some(dimensions)) => ActiveIndexConfig { model, dimensions },
+        _ => latest_active_index_config(&conn)?.unwrap_or_else(default_index_config),
+    };
     let response = embed(
         &url,
         &index_config.model,
@@ -41,9 +42,13 @@ pub(crate) fn cmd_embedding_search(
         .into_iter()
         .next()
         .ok_or_else(|| anyhow::anyhow!("embedding server returned no query embedding"))?;
-    let active_images: HashMap<String, ImageRecord> = images
+    let active_images: HashMap<String, ImageDocument> = images
         .into_iter()
         .map(|image| (image.id.clone(), image))
+        .collect();
+    let captions: HashMap<PathBuf, CaptionDocument> = captions
+        .into_iter()
+        .map(|caption| (caption.path.clone(), caption))
         .collect();
     let mut best_by_image = HashMap::new();
     for stored in active_vectors(
@@ -67,6 +72,8 @@ pub(crate) fn cmd_embedding_search(
                 .unwrap_or_else(|| "<missing>".to_string()),
             score,
             matched_field: stored.kind.matched_field(),
+            matched_atoms: vec![query.to_string()],
+            source: "embedding",
         };
         best_by_image
             .entry(stored.image_id)
@@ -77,6 +84,8 @@ pub(crate) fn cmd_embedding_search(
                     existing.description = hit.description.clone();
                     existing.score = hit.score;
                     existing.matched_field = hit.matched_field;
+                    existing.matched_atoms = hit.matched_atoms.clone();
+                    existing.source = hit.source;
                 }
             })
             .or_insert(hit);
@@ -87,10 +96,8 @@ pub(crate) fn cmd_embedding_search(
             .total_cmp(&a.score)
             .then_with(|| a.path.cmp(&b.path))
     });
-    for hit in hits.into_iter().take(limit) {
-        print_hit(hit, query, json_output)?;
-    }
-    Ok(())
+    hits.truncate(config.limit);
+    Ok(hits)
 }
 
 fn default_index_config() -> ActiveIndexConfig {
@@ -100,39 +107,11 @@ fn default_index_config() -> ActiveIndexConfig {
     }
 }
 
-fn print_hit(hit: EmbeddingSearchHit, query: &str, json_output: bool) -> Result<()> {
-    if json_output {
-        println!(
-            "{}",
-            serde_json::to_string(&json!({
-                "path": hit.path,
-                "title": hit.title,
-                "description": hit.description,
-                "score": hit.score,
-                "matched_field": hit.matched_field,
-                "matched_atoms": [query],
-                "source": "embedding",
-            }))?
-        );
-    } else {
-        println!(
-            "{}\n  title: {}\n  caption: {}\n  score: {:.4}\n  matches: {} ({})",
-            hit.path.display(),
-            hit.title,
-            hit.description,
-            hit.score,
-            hit.matched_field,
-            query
-        );
-    }
-    Ok(())
-}
-
 /// ColBERT-style late-interaction MaxSim: for each query token vector, take
 /// the maximum cosine similarity over all document vectors, then average over
 /// query tokens. With single-vector inputs (1x1) this degenerates to plain
 /// cosine similarity, so legacy single-vector indexes keep working.
-pub(super) fn late_interaction_score(query: &[Vec<f32>], document: &[Vec<f32>]) -> Result<f64> {
+pub fn late_interaction_score(query: &[Vec<f32>], document: &[Vec<f32>]) -> Result<f64> {
     if query.is_empty() || document.is_empty() {
         return Ok(0.0);
     }

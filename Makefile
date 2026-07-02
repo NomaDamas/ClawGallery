@@ -4,15 +4,15 @@ fmt:
 	cargo fmt --all -- --check
 
 lint:
-	cargo clippy --all-targets --all-features -- -D warnings
+	cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 check:
-	cargo check --all-targets --all-features
+	cargo check --workspace --all-targets --all-features
 
 build:
-	cargo build --all-features
+	cargo build --workspace --all-features
 
 test:
-	cargo test --all-features
+	cargo test --workspace --all-features
 
 ci: fmt lint test build

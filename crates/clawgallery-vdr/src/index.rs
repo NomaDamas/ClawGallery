@@ -1,22 +1,21 @@
-use crate::AppPaths;
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-#[derive(Debug)]
-pub(super) struct ActiveIndexConfig {
-    pub(super) model: String,
-    pub(super) dimensions: usize,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveIndexConfig {
+    pub model: String,
+    pub dimensions: usize,
 }
 
-#[derive(Debug, Serialize)]
-pub(super) struct VdrStatus {
-    active_images: usize,
-    active_vectors: usize,
-    model: Option<String>,
-    dimensions: Option<usize>,
-    db: PathBuf,
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct VdrStatus {
+    pub active_images: usize,
+    pub active_vectors: usize,
+    pub model: Option<String>,
+    pub dimensions: Option<usize>,
+    pub db: PathBuf,
 }
 
 pub(super) fn latest_active_index_config(conn: &Connection) -> Result<Option<ActiveIndexConfig>> {
@@ -35,7 +34,7 @@ pub(super) fn latest_active_index_config(conn: &Connection) -> Result<Option<Act
         .optional()?)
 }
 
-pub(super) fn status(paths: &AppPaths, conn: &Connection) -> Result<VdrStatus> {
+pub(super) fn status(db_path: &Path, active_images: usize, conn: &Connection) -> Result<VdrStatus> {
     let active_vectors: usize = conn.query_row(
         "select count(*) from vdr_embeddings where active = 1",
         [],
@@ -43,10 +42,10 @@ pub(super) fn status(paths: &AppPaths, conn: &Connection) -> Result<VdrStatus> {
     )?;
     let config = latest_active_index_config(conn)?;
     Ok(VdrStatus {
-        active_images: crate::latest_images(paths)?.len(),
+        active_images,
         active_vectors,
         model: config.as_ref().map(|value| value.model.clone()),
         dimensions: config.map(|value| value.dimensions),
-        db: paths.vdr_db.clone(),
+        db: db_path.to_path_buf(),
     })
 }

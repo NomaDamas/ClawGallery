@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "crates/clawgallery-vdr"]
+
 [package]
 name = "clawgallery"
 version = "0.1.0"
@@ -11,6 +14,7 @@ anyhow = "1.0"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
+clawgallery-vdr = { path = "crates/clawgallery-vdr" }
 dirs = "6.0"
 nucleo-matcher = "0.3.1"
 regex = "1.12.3"

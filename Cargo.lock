@@ -217,6 +217,7 @@ dependencies = [
  "base64",
  "chrono",
  "clap",
+ "clawgallery-vdr",
  "dirs",
  "nucleo-matcher",
  "regex",
@@ -231,6 +232,20 @@ dependencies = [
  "unicode-normalization",
  "uuid",
  "walkdir",
+]
+
+[[package]]
+name = "clawgallery-vdr"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
 ]
 
 [[package]]

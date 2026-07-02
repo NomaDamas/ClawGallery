@@ -1,49 +1,27 @@
-use crate::{AppPaths, CaptionRecord, ImageRecord};
+use crate::{CaptionDocument, ImageDocument};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use rusqlite::{Connection, params};
-use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
-use super::{EmbeddingKind, PendingEmbedding};
+use super::{EmbeddingKind, PendingEmbedding, schema};
 
-pub(super) fn open_store(paths: &AppPaths) -> Result<Connection> {
-    if let Some(parent) = paths.vdr_db.parent() {
+pub(super) fn open_store(db_path: &Path) -> Result<Connection> {
+    if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let conn = Connection::open(&paths.vdr_db)
-        .with_context(|| format!("failed to open {}", paths.vdr_db.display()))?;
-    conn.execute_batch(
-        "create table if not exists vdr_embeddings (
-            id integer primary key,
-            image_id text not null,
-            path text not null,
-            sha256 text not null,
-            kind text not null,
-            model text not null,
-            dimensions integer not null,
-            content_hash text not null default '',
-            vector_json text not null,
-            active integer not null,
-            indexed_at text not null
-        );
-        create index if not exists vdr_embeddings_lookup
-            on vdr_embeddings(image_id, sha256, kind, model, dimensions, active);
-        create index if not exists vdr_embeddings_content_lookup
-            on vdr_embeddings(image_id, content_hash, kind, model, dimensions, active);
-        create index if not exists vdr_embeddings_active
-            on vdr_embeddings(active);",
-    )?;
-    migrate_content_hash(&conn)?;
+    let conn = Connection::open(db_path)
+        .with_context(|| format!("failed to open {}", db_path.display()))?;
+    schema::ensure_schema(&conn)?;
     Ok(conn)
 }
 
 pub(super) fn update_active_vector_paths(
     conn: &Connection,
-    active_images: &[ImageRecord],
+    active_images: &[ImageDocument],
     model: &str,
     dimensions: usize,
 ) -> Result<()> {
@@ -59,8 +37,8 @@ pub(super) fn update_active_vector_paths(
 }
 pub(super) fn pending_embeddings(
     conn: &Connection,
-    images: Vec<ImageRecord>,
-    captions: &HashMap<PathBuf, CaptionRecord>,
+    images: Vec<ImageDocument>,
+    captions: &HashMap<PathBuf, CaptionDocument>,
     model: &str,
     dimensions: usize,
 ) -> Result<Vec<PendingEmbedding>> {
@@ -86,7 +64,7 @@ pub(super) fn pending_embeddings(
         }
         if let Some(caption) = captions.get(&image.path) {
             let caption_text = caption_text(caption);
-            let caption_hash = content_hash(&caption_text);
+            let caption_hash = schema::content_hash(&caption_text);
             if !has_current_vector(
                 conn,
                 &image.id,
@@ -132,7 +110,7 @@ pub(super) fn deactivate_image_vectors(conn: &Connection, image_id: &str) -> Res
 
 pub(super) fn prune_inactive_vectors(
     conn: &Connection,
-    active_images: &[ImageRecord],
+    active_images: &[ImageDocument],
 ) -> Result<()> {
     let active_ids: HashSet<&str> = active_images
         .iter()
@@ -182,7 +160,7 @@ pub(super) fn insert_vector(
 
 pub(super) fn active_vectors(
     conn: &Connection,
-    active_images: &HashMap<String, ImageRecord>,
+    active_images: &HashMap<String, ImageDocument>,
     model: &str,
     dimensions: usize,
 ) -> Result<Vec<StoredVector>> {
@@ -210,7 +188,7 @@ pub(super) fn active_vectors(
         vectors.push(StoredVector {
             image_id,
             kind,
-            vectors: parse_stored_vectors(&vector_json)?,
+            vectors: schema::parse_stored_vectors(&vector_json)?,
         });
     }
     Ok(vectors)
@@ -242,39 +220,8 @@ fn has_current_vector(
     Ok(count > 0)
 }
 
-fn migrate_content_hash(conn: &Connection) -> Result<()> {
-    let mut stmt = conn.prepare("pragma table_info(vdr_embeddings)")?;
-    let columns = stmt
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    if !columns.iter().any(|column| column == "content_hash") {
-        conn.execute(
-            "alter table vdr_embeddings add column content_hash text not null default ''",
-            [],
-        )?;
-    }
-    Ok(())
-}
-
-fn caption_text(caption: &CaptionRecord) -> String {
+fn caption_text(caption: &CaptionDocument) -> String {
     format!("{}\n{}", caption.title, caption.description)
-}
-
-fn content_hash(value: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(value.as_bytes());
-    format!("{:x}", hasher.finalize())
-}
-
-/// Parses stored vector JSON, accepting both the legacy single-vector shape
-/// (`[f32, …]`) and the multi-vector shape (`[[f32, …], …]`).
-fn parse_stored_vectors(vector_json: &str) -> Result<Vec<Vec<f32>>> {
-    let value: serde_json::Value = serde_json::from_str(vector_json)?;
-    match value.as_array().and_then(|items| items.first()) {
-        Some(serde_json::Value::Array(_)) => Ok(serde_json::from_value(value)?),
-        Some(_) => Ok(vec![serde_json::from_value(value)?]),
-        None => Ok(Vec::new()),
-    }
 }
 
 #[derive(Debug)]

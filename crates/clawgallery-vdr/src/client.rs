@@ -5,7 +5,7 @@ use std::{env, thread, time::Duration};
 
 use super::{DEFAULT_EMBEDDING_URL, DEFAULT_VDR_MODEL};
 
-pub(crate) const DEFAULT_MAX_RETRIES: usize = 3;
+pub const DEFAULT_MAX_RETRIES: usize = 3;
 
 #[derive(Debug, Serialize)]
 pub(super) struct EmbedInput {
