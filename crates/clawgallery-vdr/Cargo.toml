@@ -2,8 +2,13 @@
 name = "clawgallery-vdr"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Reusable visual document retrieval indexing and search library for ClawGallery."
 license = "Apache-2.0"
+repository = "https://github.com/NomaDamas/ClawGallery"
+homepage = "https://github.com/NomaDamas/ClawGallery"
+keywords = ["image-search", "embeddings", "vdr", "sqlite"]
+categories = ["algorithms", "database", "multimedia::images"]
 
 [dependencies]
 anyhow = "1.0"

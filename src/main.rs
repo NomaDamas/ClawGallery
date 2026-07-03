@@ -70,12 +70,15 @@ enum Command {
     Caption(CaptionArgs),
     /// Safely rename images from generated titles/captions.
     Rename(RenameArgs),
+    /// Remove one tracked image from the active library.
     Forget(ForgetArgs),
+    /// Report exact or embedding-based duplicate image groups.
     Dedup(DedupArgs),
     /// Search local JSONL metadata by keyword.
     Search(SearchArgs),
     /// Manage local visual document retrieval embeddings.
     Vdr(vdr::VdrArgs),
+    /// Install and control the background polling service.
     Daemon(DaemonArgs),
     /// Show state and configuration summary.
     Status,
@@ -227,12 +230,19 @@ struct DaemonArgs {
 
 #[derive(Debug, Subcommand)]
 enum DaemonCommand {
+    /// Install the user service definition.
     Install(DaemonPollArgs),
+    /// Start the installed user service.
     Start,
+    /// Stop the installed user service.
     Stop,
+    /// Show service, log, PID, and last-start status.
     Status,
+    /// Remove the installed user service definition.
     Uninstall,
+    /// Print daemon log output.
     Logs,
+    /// Run the polling loop under the service manager.
     Run(DaemonPollArgs),
 }
 

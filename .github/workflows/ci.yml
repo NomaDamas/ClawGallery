@@ -22,3 +22,5 @@ jobs:
         run: cargo test --all-features
       - name: Build
         run: cargo build --all-features
+      - name: Package library crate
+        run: cargo package -p clawgallery-vdr

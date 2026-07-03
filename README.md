@@ -11,6 +11,22 @@ make ci
 cargo install --path .
 ```
 
+## Release checklist
+
+Before publishing a release, verify the package surface and the user-facing CLI:
+
+- `cargo fmt --all -- --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test --all-features`
+- `cargo package --allow-dirty --no-verify --list`
+- `cargo package -p clawgallery-vdr`
+- `cargo package -p clawgallery` after `clawgallery-vdr` is published or otherwise available to the registry resolver
+- `cargo run -- --help`
+- `cargo run -- vdr --help`
+- `cargo run -- daemon --help`
+
+Check that `Cargo.toml` includes the current version, repository, license, README, keywords, categories, and versioned workspace dependencies. Publish or verify `clawgallery-vdr` before verifying or publishing the root `clawgallery` crate, because the CLI package depends on the library crate by version. Re-read the Quickstart, command list, VDR setup, daemon notes, rename safety, auth, and state-file sections for consistency with CLI help before tagging.
+
 ## Quickstart
 
 ```bash

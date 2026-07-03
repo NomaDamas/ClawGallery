@@ -24,8 +24,11 @@ pub(crate) struct VdrArgs {
 
 #[derive(Debug, Subcommand)]
 enum VdrCommand {
+    /// Index active images and captions into the local VDR store.
     Sync(VdrSyncArgs),
+    /// Show local VDR index metadata and counts.
     Status(VdrStatusArgs),
+    /// Run a local embedding HTTP server for VDR sync and search.
     Serve(VdrServeArgs),
 }
 
