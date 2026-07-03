@@ -27,6 +27,25 @@ Before publishing a release, verify the package surface and the user-facing CLI:
 
 Check that `Cargo.toml` includes the current version, repository, license, README, keywords, categories, and versioned workspace dependencies. Publish or verify `clawgallery-vdr` before verifying or publishing the root `clawgallery` crate, because the CLI package depends on the library crate by version. Re-read the Quickstart, command list, VDR setup, daemon notes, rename safety, auth, and state-file sections for consistency with CLI help before tagging.
 
+### First crates.io release
+
+Trusted Publishing requires the crate to exist before the trusted publisher is configured. For the first release, publish manually with a crates.io API token:
+
+```bash
+cargo publish -p clawgallery-vdr
+cargo publish -p clawgallery
+```
+
+Wait for `clawgallery-vdr` to appear in the crates.io index before publishing `clawgallery`; otherwise the root package cannot resolve its versioned library dependency.
+
+After the first release, configure Trusted Publishing for both crates on crates.io with:
+
+- repository: `NomaDamas/ClawGallery`
+- workflow: `.github/workflows/publish.yml`
+- environment: `crates-io`
+
+Future publishes should be created from a GitHub Release. The publish workflow authenticates with crates.io through GitHub OIDC, publishes `clawgallery-vdr`, waits for the registry index, then publishes `clawgallery`.
+
 ## Quickstart
 
 ```bash

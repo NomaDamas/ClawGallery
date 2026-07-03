@@ -1,0 +1,51 @@
+name: Publish
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  crates-io:
+    name: Publish crates.io packages
+    runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Verify workspace
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo test --all-features
+      - name: Authenticate to crates.io
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+      - name: Publish clawgallery-vdr
+        run: cargo publish -p clawgallery-vdr --token "$CARGO_REGISTRY_TOKEN"
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+      - name: Wait for clawgallery-vdr registry index
+        run: |
+          for attempt in {1..30}; do
+            if cargo search clawgallery-vdr --limit 1 | grep -q '^clawgallery-vdr = "0.1.0"'; then
+              exit 0
+            fi
+            echo "waiting for clawgallery-vdr 0.1.0 in crates.io index ($attempt/30)"
+            sleep 10
+          done
+          echo "clawgallery-vdr 0.1.0 did not appear in crates.io index in time" >&2
+          exit 1
+      - name: Publish clawgallery
+        run: cargo publish -p clawgallery --token "$CARGO_REGISTRY_TOKEN"
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
