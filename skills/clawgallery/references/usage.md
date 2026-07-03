@@ -1,9 +1,27 @@
 # ClawGallery CLI Reference
 
+- Install: `cargo install --path .`
+- Initialize state: `clawgallery init`
 - Register folders: `clawgallery folder add <path>`
-- Bootstrap images: `clawgallery bootstrap`
+- Bootstrap image records: `clawgallery bootstrap` or `clawgallery bootstrap --prune`
+- Check state: `clawgallery status`
 - Poll: `clawgallery poll --once` or `clawgallery poll --interval 30`
-- Caption: `clawgallery caption --missing`
-- Search: `clawgallery search <keywords...>`
-- Rename preview: `clawgallery rename`
+- Preview caption work: `clawgallery caption --dry-run`
+- Caption missing images: `clawgallery caption --missing`
+- Search captions/paths: `clawgallery search "<query>" --json --limit 5`
+- Search VDR embeddings: `clawgallery search --mode embedding "<query>" --json --limit 5`
+- Sync VDR embeddings: `clawgallery vdr sync`
+- Check VDR state: `clawgallery vdr status --json`
+- Rename preview: `clawgallery rename --dry-run`
 - Rename apply: `clawgallery rename --apply`
+
+Agent default for local screenshot/photo search:
+
+```bash
+clawgallery init
+clawgallery folder add ~/Pictures
+test -d ~/Pictures/screenshots && clawgallery folder add ~/Pictures/screenshots
+test -d ~/Picutres/screenshots && clawgallery folder add ~/Picutres/screenshots
+clawgallery bootstrap
+clawgallery search "<observed visual query>" --json --limit 5
+```
