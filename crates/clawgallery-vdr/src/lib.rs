@@ -19,6 +19,7 @@ pub use search::{EmbeddingSearchHit, late_interaction_score};
 pub const DEFAULT_EMBEDDING_URL: &str = "http://127.0.0.1:8765";
 pub const DEFAULT_VDR_MODEL: &str = "vidore/colqwen2-v1.0";
 pub const DEFAULT_DIMENSIONS: usize = 128;
+const SYNC_EMBEDDING_BATCH_SIZE: usize = 1;
 
 #[derive(Debug, Clone)]
 pub struct ImageDocument {
@@ -123,33 +124,36 @@ pub fn sync(
     if pending.is_empty() {
         return Ok(SyncOutcome { indexed_vectors: 0 });
     }
-    let inputs = pending
-        .iter()
-        .map(|item| client::EmbedInput {
-            kind: item.kind.as_str().to_string(),
-            role: "document".to_string(),
-            value: item.value.clone(),
-        })
-        .collect();
     let url = client::resolve_embedding_url(config.embedding_url.as_deref());
-    let response = client::embed_with_retries(
-        &url,
-        &config.model,
-        config.dimensions,
-        inputs,
-        config.max_retries,
-    )?;
-    if response.embeddings.len() != pending.len() {
-        bail!(
-            "embedding server returned {} embedding(s) for {} input(s)",
-            response.embeddings.len(),
-            pending.len()
-        );
-    }
-    let indexed_vectors = response.embeddings.len();
-    for (item, vector) in pending.into_iter().zip(response.embeddings) {
-        store::deactivate_existing_kind(&conn, &item.image_id, item.kind)?;
-        store::insert_vector(&conn, &item, &response.model, config.dimensions, &vector)?;
+    let mut indexed_vectors = 0;
+    for batch in pending.chunks(SYNC_EMBEDDING_BATCH_SIZE) {
+        let inputs = batch
+            .iter()
+            .map(|item| client::EmbedInput {
+                kind: item.kind.as_str().to_string(),
+                role: "document".to_string(),
+                value: item.value.clone(),
+            })
+            .collect();
+        let response = client::embed_with_retries(
+            &url,
+            &config.model,
+            config.dimensions,
+            inputs,
+            config.max_retries,
+        )?;
+        if response.embeddings.len() != batch.len() {
+            bail!(
+                "embedding server returned {} embedding(s) for {} input(s)",
+                response.embeddings.len(),
+                batch.len()
+            );
+        }
+        indexed_vectors += response.embeddings.len();
+        for (item, vector) in batch.iter().zip(response.embeddings) {
+            store::deactivate_existing_kind(&conn, &item.image_id, item.kind)?;
+            store::insert_vector(&conn, item, &response.model, config.dimensions, &vector)?;
+        }
     }
     Ok(SyncOutcome { indexed_vectors })
 }

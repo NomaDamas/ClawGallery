@@ -26,12 +26,19 @@ pub(crate) fn run_without_embedding_url(config: &Path, args: &[&str], mlx_fake: 
         .expect("clawgallery command should run")
 }
 
+#[allow(dead_code)]
 pub(crate) fn one_image_library() -> (tempfile::TempDir, PathBuf) {
+    image_library(&["dog.png"])
+}
+
+pub(crate) fn image_library(image_names: &[&str]) -> (tempfile::TempDir, PathBuf) {
     let temp = tempfile::tempdir().expect("tempdir");
     let config = temp.path().join("state");
     let images = temp.path().join("images");
     fs::create_dir_all(&images).expect("create images");
-    fs::write(images.join("dog.png"), b"dog image bytes").expect("write image");
+    for image_name in image_names {
+        fs::write(images.join(image_name), format!("{image_name} bytes")).expect("write image");
+    }
     assert_success(run_without_embedding_url(&config, &["init"], false));
     assert_success(run_without_embedding_url(
         &config,

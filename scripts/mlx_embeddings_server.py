@@ -5,7 +5,7 @@ import ipaddress
 import json
 import os
 import re
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Final, Literal, assert_never
 
@@ -93,7 +93,10 @@ class Embedder:
             mlx_embeddings = importlib.import_module("mlx_embeddings")
             transformers = importlib.import_module("transformers")
             self.model, self.tokenizer = mlx_embeddings.load(model_name)
-            self.image_processor = transformers.AutoImageProcessor.from_pretrained(model_name)
+            self.image_processor = transformers.AutoImageProcessor.from_pretrained(
+                model_name,
+                use_fast=False,
+            )
             if device != "auto" and hasattr(self.model, "to"):
                 self.model = self.model.to(device)
 
@@ -258,7 +261,7 @@ def main() -> None:
     args = parse_args()
     validate_bind_host(args)
     embedder = Embedder(args.model, args.dimensions, args.device)
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(embedder))
+    server = HTTPServer((args.host, args.port), make_handler(embedder))
     print(
         json.dumps(
             {
