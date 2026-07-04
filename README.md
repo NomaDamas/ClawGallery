@@ -63,19 +63,21 @@ Semantic image search through local VDR with the packaged MLX daemon on macOS:
 brew install rust uv
 cargo install --path .
 uv tool install mlx-embeddings --with pillow --with torch --with torchvision
+CLAWGALLERY_PYTHON="$(uv tool dir)/mlx-embeddings/bin/python" clawgallery vdr sync
+# Terminal A: keep a compatible embedding server running for search
 CLAWGALLERY_PYTHON="$(uv tool dir)/mlx-embeddings/bin/python" clawgallery vdr serve --backend mlx
-clawgallery vdr sync --model qnguyen3/colqwen2.5-v0.2-mlx --dimensions 128
+# Terminal B
 clawgallery search --mode embedding "login error" --json
 ```
 
-The MLX path uses `mlx-embeddings` with the late-interaction ColQwen2.5 model `qnguyen3/colqwen2.5-v0.2-mlx`. `clawgallery vdr serve --backend mlx` launches ClawGallery's packaged Python `/embed` daemon, so an installed Rust binary does not need the repository's `scripts/` directory at runtime. The daemon binds to `127.0.0.1` by default and refuses non-loopback hosts unless `--allow-remote` is passed.
+The MLX path uses `mlx-embeddings` with the late-interaction ColQwen2.5 model `qnguyen3/colqwen2.5-v0.2-mlx`. By default, `clawgallery vdr sync` starts ClawGallery's packaged Python `/embed` daemon on a loopback port, waits until it is reachable, lets the model runtime download/cache weights as needed, indexes active images, and terminates the daemon before exiting. Pass `--embedding-url` or set `CLAWGALLERY_VDR_EMBEDDING_URL` to use an already-running compatible server instead, or pass `--no-auto-start` to keep the old external-server requirement. `clawgallery vdr serve --backend mlx` remains available for a long-running manual daemon, and embedding search still needs one because the query text must also be embedded. The daemon binds to `127.0.0.1` by default and refuses non-loopback hosts unless `--allow-remote` is passed.
 
 Legacy ColQwen2 server path (default VDR model: `vidore/colqwen2-v1.0`, dimensions `128`):
 
 ```bash
 uv pip install colpali-engine torch pillow
 python scripts/colqwen2_server.py --device auto
-clawgallery vdr sync
+clawgallery vdr sync --no-auto-start --model vidore/colqwen2-v1.0 --dimensions 128
 clawgallery search --mode embedding "login error" --json
 ```
 
@@ -83,7 +85,7 @@ Alternative Jina Omni embedding path:
 
 ```bash
 python scripts/jina_omni_server.py --device auto
-clawgallery vdr sync --model jinaai/jina-embeddings-v5-omni-small --dimensions 1024
+clawgallery vdr sync --no-auto-start --model jinaai/jina-embeddings-v5-omni-small --dimensions 1024
 clawgallery search --mode embedding "login error" --json
 ```
 
@@ -169,7 +171,7 @@ clawgallery rename --undo [--last] [--file <path>] [--dry-run]
 clawgallery forget --file <path> [--delete]
 clawgallery dedup [--exact] [--similar] [--threshold <0..1>] [--json]
 clawgallery search [--mode keyword|embedding] <query...> [--limit <n>] [--json] [--case-sensitive] [--no-fuzzy] [--embedding-url <url>]
-clawgallery vdr sync [--prune] [--embedding-url <url>] [--model <model>] [--dimensions <n>] [--max-retries <n>]
+clawgallery vdr sync [--prune] [--embedding-url <url>] [--model <model>] [--dimensions <n>] [--max-retries <n>] [--auto-start|--no-auto-start] [--backend mlx] [--host <host>] [--port <port>] [--device auto|mps|cpu] [--python <path>] [--allow-remote]
 clawgallery vdr serve [--backend mlx] [--host <host>] [--port <port>] [--model <model>] [--dimensions <n>] [--device auto|mps|cpu] [--python <path>] [--allow-remote]
 clawgallery vdr status [--json]
 clawgallery daemon install [--interval <seconds>] [--caption] [--sync] [--path <path>] [--folder <id>]
@@ -210,6 +212,8 @@ Lowercase queries use smart-case matching; any uppercase atom becomes case-sensi
 
 VDR stores image embeddings for every active image and stores caption embeddings only when an active image has caption text. The store is embedded SQLite so it needs no daemon, works well on macOS, and stays inside the same config directory as the JSONL state. `clawgallery vdr sync` is incremental: unchanged image and caption content hashes are skipped, changed files or captions are re-embedded, and `--prune` deactivates vectors for images that are no longer active after `bootstrap --prune`.
 
+The inference runtime is intentionally managed from Rust but not reimplemented in Rust: maintained ColQwen-family late-interaction model runtimes on macOS are currently MLX/Python-based. The vector store remains ClawGallery's embedded SQLite multi-vector store with Rust-side MaxSim scoring, avoiding a separate vector database daemon while preserving late-interaction rows.
+
 The local embedding server contract accepts `kind` values `image`, `text`, or `caption`; `caption` is caption-document text encoded like text. For image inputs, `value` is the image path, including `.heic`/`.heif` paths, so the embedding server must have any needed HEIC decoder such as Pillow plus `pillow-heif`. `role` is `document` or `query` and a compatible server may ignore it. Responses may contain either one vector per input or multi-vector embeddings per input.
 
 ```text
@@ -217,12 +221,22 @@ POST /embed
 {"model":"vidore/colqwen2-v1.0","dimensions":128,"inputs":[{"kind":"image|text|caption","role":"document|query","value":"path or text"}]}
 ```
 
-The packaged macOS-optimized server uses `mlx-embeddings` with `qnguyen3/colqwen2.5-v0.2-mlx` and 128-dimensional late-interaction ColQwen2.5 embeddings:
+The packaged macOS-optimized server uses `mlx-embeddings` with `qnguyen3/colqwen2.5-v0.2-mlx` and 128-dimensional late-interaction ColQwen2.5 embeddings. `clawgallery vdr sync` starts this server automatically when neither `--embedding-url` nor `CLAWGALLERY_VDR_EMBEDDING_URL` is provided:
 
 ```bash
 uv tool install mlx-embeddings --with pillow --with torch --with torchvision
 CLAWGALLERY_PYTHON="$(uv tool dir)/mlx-embeddings/bin/python" \
+  clawgallery vdr sync
+```
+
+For embedding search, keep a persistent server running in another terminal:
+
+```bash
+# Terminal A
+CLAWGALLERY_PYTHON="$(uv tool dir)/mlx-embeddings/bin/python" \
   clawgallery vdr serve --backend mlx --host 127.0.0.1 --port 8765
+# Terminal B
+clawgallery search --mode embedding "login error" --json
 ```
 
 The legacy local server uses `vidore/colqwen2-v1.0` with 128-dimensional ColQwen2 embeddings:
@@ -235,10 +249,11 @@ The alternative Jina Omni path uses `jinaai/jina-embeddings-v5-omni-small` throu
 
 ```bash
 python scripts/jina_omni_server.py --host 127.0.0.1 --port 8765 --device auto
+clawgallery vdr sync --no-auto-start --model jinaai/jina-embeddings-v5-omni-small --dimensions 1024
 ```
 
 If Hugging Face xet downloads stall on macOS, retry the first run with `HF_HUB_DISABLE_XET=1`.
-Set `CLAWGALLERY_VDR_EMBEDDING_URL` or pass `--embedding-url` to point the CLI at a different compatible local server.
+Set `CLAWGALLERY_VDR_EMBEDDING_URL` or pass `--embedding-url` to point the CLI at a different compatible local server; either setting disables managed auto-start for that sync run.
 
 ## Rename safety
 

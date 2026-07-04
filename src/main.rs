@@ -639,6 +639,14 @@ fn cmd_poll(paths: &AppPaths, args: PollArgs) -> Result<()> {
                     model: args.vdr_model.clone(),
                     dimensions: args.vdr_dimensions,
                     max_retries: args.max_retries,
+                    auto_start: false,
+                    no_auto_start: true,
+                    backend: vdr::ServeBackend::Mlx,
+                    host: "127.0.0.1".to_string(),
+                    port: 0,
+                    device: "auto".to_string(),
+                    python: None,
+                    allow_remote: false,
                 },
             )
         {

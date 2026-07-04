@@ -4,17 +4,20 @@ use clap::{Args, Subcommand};
 use clawgallery_vdr::{
     CaptionDocument, ImageDocument, SearchConfig, SyncConfig, SyncOutcome,
     deactivate_image_vectors as deactivate_library_vectors, embedding_search,
-    similar_image_groups as library_similar_image_groups, status as library_status, sync,
+    pending_embedding_count, similar_image_groups as library_similar_image_groups,
+    status as library_status, sync,
 };
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, env, path::PathBuf};
 
 mod serve;
 
 pub(crate) use clawgallery_vdr::SimilarImageGroup;
 pub(crate) use clawgallery_vdr::{DEFAULT_DIMENSIONS, DEFAULT_MAX_RETRIES, DEFAULT_VDR_MODEL};
+pub(crate) use serve::ServeBackend;
 
 const DEFAULT_MLX_MODEL: &str = "qnguyen3/colqwen2.5-v0.2-mlx";
 const DEFAULT_MLX_DIMENSIONS: usize = 128;
+const DEFAULT_MANAGED_HOST: &str = "127.0.0.1";
 
 #[derive(Debug, Args)]
 pub(crate) struct VdrArgs {
@@ -38,12 +41,28 @@ pub(crate) struct VdrSyncArgs {
     pub(crate) prune: bool,
     #[arg(long)]
     pub(crate) embedding_url: Option<String>,
-    #[arg(long, default_value = DEFAULT_VDR_MODEL)]
+    #[arg(long, default_value = DEFAULT_MLX_MODEL)]
     pub(crate) model: String,
-    #[arg(long, default_value_t = DEFAULT_DIMENSIONS)]
+    #[arg(long, default_value_t = DEFAULT_MLX_DIMENSIONS)]
     pub(crate) dimensions: usize,
     #[arg(long, default_value_t = DEFAULT_MAX_RETRIES)]
     pub(crate) max_retries: usize,
+    #[arg(long, conflicts_with = "no_auto_start")]
+    pub(crate) auto_start: bool,
+    #[arg(long)]
+    pub(crate) no_auto_start: bool,
+    #[arg(long, value_enum, default_value_t = serve::ServeBackend::Mlx)]
+    pub(crate) backend: serve::ServeBackend,
+    #[arg(long, default_value = DEFAULT_MANAGED_HOST)]
+    pub(crate) host: String,
+    #[arg(long, default_value_t = 0)]
+    pub(crate) port: u16,
+    #[arg(long, default_value = "auto")]
+    pub(crate) device: String,
+    #[arg(long)]
+    pub(crate) python: Option<PathBuf>,
+    #[arg(long)]
+    pub(crate) allow_remote: bool,
 }
 
 #[derive(Debug, Args)]
@@ -109,20 +128,51 @@ fn cmd_serve(args: VdrServeArgs) -> Result<()> {
 pub(crate) fn cmd_sync(paths: &AppPaths, args: VdrSyncArgs) -> Result<()> {
     let captions = crate::latest_captions_by_path(paths)?;
     let (images, refreshed_files) = crate::latest_images_refreshing_changed_files(paths)?;
-    let outcome = sync(
-        &SyncConfig {
-            db_path: paths.vdr_db.clone(),
-            model: args.model,
+    let config = SyncConfig {
+        db_path: paths.vdr_db.clone(),
+        model: args.model.clone(),
+        dimensions: args.dimensions,
+        embedding_url: args.embedding_url.clone(),
+        max_retries: args.max_retries,
+        prune: args.prune || refreshed_files,
+    };
+    let image_documents = image_documents(&images);
+    let caption_documents = caption_documents_from_map(captions);
+    let should_auto_start = should_auto_start(&args)
+        && pending_embedding_count(&config, image_documents.clone(), caption_documents.clone())?
+            > 0;
+    let managed_server = should_auto_start.then(|| {
+        serve::ManagedServer::start(&serve::ServeArgs {
+            backend: args.backend,
+            host: args.host.clone(),
+            port: args.port,
+            model: args.model.clone(),
             dimensions: args.dimensions,
-            embedding_url: args.embedding_url,
-            max_retries: args.max_retries,
-            prune: args.prune || refreshed_files,
-        },
-        image_documents(&images),
-        caption_documents_from_map(captions),
-    )?;
+            device: args.device.clone(),
+            python: args.python.clone(),
+            allow_remote: args.allow_remote,
+        })
+    });
+    let managed_server = managed_server.transpose()?;
+    let embedding_url = args.embedding_url.or_else(|| {
+        managed_server
+            .as_ref()
+            .map(|server| server.url().to_string())
+    });
+    let config = SyncConfig {
+        embedding_url,
+        ..config
+    };
+    let outcome = sync(&config, image_documents, caption_documents)?;
     print_sync_outcome(outcome);
     Ok(())
+}
+
+fn should_auto_start(args: &VdrSyncArgs) -> bool {
+    if args.embedding_url.is_some() || args.no_auto_start {
+        return false;
+    }
+    args.auto_start || env::var_os("CLAWGALLERY_VDR_EMBEDDING_URL").is_none()
 }
 
 fn cmd_status(paths: &AppPaths, args: VdrStatusArgs) -> Result<()> {

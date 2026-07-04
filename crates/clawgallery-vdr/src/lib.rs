@@ -154,6 +154,22 @@ pub fn sync(
     Ok(SyncOutcome { indexed_vectors })
 }
 
+pub fn pending_embedding_count(
+    config: &SyncConfig,
+    images: Vec<ImageDocument>,
+    captions: Vec<CaptionDocument>,
+) -> Result<usize> {
+    let conn = store::open_store(&config.db_path)?;
+    let captions = captions_by_path(captions);
+    if config.prune {
+        store::prune_inactive_vectors(&conn, &images)?;
+    }
+    store::update_active_vector_paths(&conn, &images, &config.model, config.dimensions)?;
+    let pending =
+        store::pending_embeddings(&conn, images, &captions, &config.model, config.dimensions)?;
+    Ok(pending.len())
+}
+
 pub fn embedding_search(
     config: &SearchConfig,
     query: &str,

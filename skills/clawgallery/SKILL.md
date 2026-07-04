@@ -73,12 +73,29 @@ Search atoms follow fzf-like rules: whitespace means AND, `'foo` exact substring
 
 ## VDR embedding search
 
-Default local VDR path (`vidore/colqwen2-v1.0`, dimensions `128`):
+Default managed MLX path (`qnguyen3/colqwen2.5-v0.2-mlx`, dimensions `128`):
+
+```bash
+uv tool install mlx-embeddings --with pillow --with torch --with torchvision
+CLAWGALLERY_PYTHON="$(uv tool dir)/mlx-embeddings/bin/python" \
+  clawgallery vdr sync
+# Terminal A: keep a compatible embedding server running for search
+CLAWGALLERY_PYTHON="$(uv tool dir)/mlx-embeddings/bin/python" \
+  clawgallery vdr serve --backend mlx
+# Terminal B
+clawgallery search --mode embedding "github actions" --json
+```
+
+`clawgallery vdr sync` starts the packaged MLX `/embed` daemon automatically when no `--embedding-url` and no `CLAWGALLERY_VDR_EMBEDDING_URL` are configured, waits for it, lets the model runtime download/cache weights as needed, indexes active images, and terminates it before exit. Embedding search still needs a live embedding endpoint for the query vector, so run `clawgallery vdr serve --backend mlx` in another terminal or pass `--embedding-url` to an existing compatible server. Pass `--no-auto-start` to require an external server during sync.
+
+The inference runtime is Rust-managed but MLX/Python-based because maintained ColQwen-family late-interaction model runtimes on macOS are not currently available as a low-risk pure Rust stack. Storage remains ClawGallery's embedded SQLite multi-vector store with Rust-side MaxSim scoring.
+
+Legacy ColQwen2 external-server path (`vidore/colqwen2-v1.0`, dimensions `128`):
 
 ```bash
 uv pip install colpali-engine torch pillow
 python scripts/colqwen2_server.py --device auto
-clawgallery vdr sync
+clawgallery vdr sync --no-auto-start --model vidore/colqwen2-v1.0 --dimensions 128
 clawgallery search --mode embedding "github actions" --json
 ```
 
@@ -86,7 +103,7 @@ Alternative Jina Omni path:
 
 ```bash
 python scripts/jina_omni_server.py --device auto
-clawgallery vdr sync --model jinaai/jina-embeddings-v5-omni-small --dimensions 1024
+clawgallery vdr sync --no-auto-start --model jinaai/jina-embeddings-v5-omni-small --dimensions 1024
 clawgallery search --mode embedding "github actions" --json
 ```
 
