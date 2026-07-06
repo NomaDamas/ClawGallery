@@ -3,6 +3,7 @@ import argparse
 import importlib
 import ipaddress
 import json
+import math
 import os
 import re
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -51,7 +52,7 @@ def validate_bind_host(args: argparse.Namespace) -> None:
 def normalize_rows(rows: list[list[float]], dimensions: int) -> list[list[float]]:
     normalized: list[list[float]] = []
     for row in rows:
-        trimmed = row[:dimensions]
+        trimmed = [value if math.isfinite(value) else 0.0 for value in row[:dimensions]]
         if len(trimmed) < dimensions:
             trimmed = [*trimmed, *([0.0] * (dimensions - len(trimmed)))]
         norm = sum(value * value for value in trimmed) ** 0.5
