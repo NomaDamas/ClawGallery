@@ -2,7 +2,7 @@ use crate::{AppPaths, CaptionRecord, ImageRecord};
 use anyhow::Result;
 use clap::{Args, Subcommand};
 use clawgallery_vdr::{
-    CaptionDocument, ImageDocument, SearchConfig, SyncConfig, SyncOutcome,
+    CaptionDocument, EmbeddingSearchHit, ImageDocument, SearchConfig, SyncConfig, SyncOutcome,
     deactivate_image_vectors as deactivate_library_vectors, embedding_search,
     pending_embedding_count, similar_image_groups as library_similar_image_groups,
     status as library_status, sync,
@@ -194,43 +194,58 @@ fn cmd_status(paths: &AppPaths, args: VdrStatusArgs) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn cmd_embedding_search(
+pub(crate) fn embedding_search_hits(
     paths: &AppPaths,
     query: &str,
     limit: usize,
-    json_output: bool,
     embedding_url: Option<&str>,
+    skip_empty_index: bool,
     images: Vec<ImageRecord>,
     captions: HashMap<PathBuf, CaptionRecord>,
-) -> Result<()> {
-    let hits = embedding_search(
+) -> Result<Vec<EmbeddingSearchHit>> {
+    let status = library_status(&paths.vdr_db, images.len())?;
+    if status.active_vectors == 0 && skip_empty_index {
+        return Ok(Vec::new());
+    }
+    let model = status
+        .model
+        .unwrap_or_else(|| DEFAULT_MLX_MODEL.to_string());
+    let dimensions = status.dimensions.unwrap_or(DEFAULT_MLX_DIMENSIONS);
+    let env_embedding_url = env::var("CLAWGALLERY_VDR_EMBEDDING_URL").ok();
+    let managed_server = if embedding_url.is_none() && env_embedding_url.is_none() {
+        Some(serve::ManagedServer::start_quiet(&serve::ServeArgs {
+            backend: serve::ServeBackend::Mlx,
+            host: DEFAULT_MANAGED_HOST.to_string(),
+            port: 0,
+            model: model.clone(),
+            dimensions,
+            device: "auto".to_string(),
+            python: None,
+            allow_remote: false,
+        })?)
+    } else {
+        None
+    };
+    let embedding_url = embedding_url
+        .map(str::to_string)
+        .or(env_embedding_url)
+        .or_else(|| {
+            managed_server
+                .as_ref()
+                .map(|server| server.url().to_string())
+        });
+    embedding_search(
         &SearchConfig {
             db_path: paths.vdr_db.clone(),
-            model: None,
-            dimensions: None,
-            embedding_url: embedding_url.map(str::to_string),
+            model: Some(model),
+            dimensions: Some(dimensions),
+            embedding_url,
             limit,
         },
         query,
         image_documents(&images),
         caption_documents_from_map(captions),
-    )?;
-    for hit in hits {
-        if json_output {
-            println!("{}", serde_json::to_string(&hit)?);
-        } else {
-            println!(
-                "{}\n  title: {}\n  caption: {}\n  score: {:.4}\n  matches: {} ({})",
-                hit.path.display(),
-                hit.title,
-                hit.description,
-                hit.score,
-                hit.matched_field,
-                query
-            );
-        }
-    }
-    Ok(())
+    )
 }
 
 fn print_sync_outcome(outcome: SyncOutcome) {

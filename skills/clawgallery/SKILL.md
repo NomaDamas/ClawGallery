@@ -60,7 +60,7 @@ clawgallery caption --missing
 
 ## Search
 
-Keyword/fuzzy search:
+Hybrid caption/path + VDR search (default):
 
 ```bash
 clawgallery search "login error" --limit 5 --json
@@ -69,7 +69,7 @@ clawgallery search "'github" "actions" --json
 clawgallery search "!error" "^login"
 ```
 
-Search atoms follow fzf-like rules: whitespace means AND, `'foo` exact substring, `^foo` prefix, `foo$` suffix, `!foo` exclusion, and `\ ` literal space. Add `--no-fuzzy` for old exact-substring behavior.
+Search atoms follow fzf-like rules for the keyword side: whitespace means AND, `'foo` exact substring, `^foo` prefix, `foo$` suffix, `!foo` exclusion, and `\ ` literal space. When a VDR index exists, default search also runs embedding search and fuses both rankings. Add `--mode keyword` for caption/path keyword search only, `--mode embedding` for VDR only, or `--no-fuzzy` for old exact-substring behavior.
 
 ## VDR embedding search
 
@@ -79,14 +79,10 @@ Default managed MLX path (`qnguyen3/colqwen2.5-v0.2-mlx`, dimensions `128`):
 uv tool install mlx-embeddings --with pillow --with torch --with torchvision
 CLAWGALLERY_PYTHON="$(uv tool dir)/mlx-embeddings/bin/python" \
   clawgallery vdr sync
-# Terminal A: keep a compatible embedding server running for search
-CLAWGALLERY_PYTHON="$(uv tool dir)/mlx-embeddings/bin/python" \
-  clawgallery vdr serve --backend mlx
-# Terminal B
-clawgallery search --mode embedding "github actions" --json
+clawgallery search "github actions" --json
 ```
 
-`clawgallery vdr sync` starts the packaged MLX `/embed` daemon automatically when no `--embedding-url` and no `CLAWGALLERY_VDR_EMBEDDING_URL` are configured, waits for it, lets the model runtime download/cache weights as needed, indexes active images, and terminates it before exit. Embedding search still needs a live embedding endpoint for the query vector, so run `clawgallery vdr serve --backend mlx` in another terminal or pass `--embedding-url` to an existing compatible server. Pass `--no-auto-start` to require an external server during sync.
+`clawgallery vdr sync` starts the packaged MLX `/embed` daemon automatically when no `--embedding-url` and no `CLAWGALLERY_VDR_EMBEDDING_URL` are configured, waits for it, lets the model runtime download/cache weights as needed, indexes active images, and terminates it before exit. Default search and `--mode embedding` also start a managed MLX server automatically for the query embedding when an index exists and no compatible endpoint is configured. Pass `--no-auto-start` to require an external server during sync.
 
 The inference runtime is Rust-managed but MLX/Python-based because maintained ColQwen-family late-interaction model runtimes on macOS are not currently available as a low-risk pure Rust stack. Storage remains ClawGallery's embedded SQLite multi-vector store with Rust-side MaxSim scoring.
 
@@ -154,7 +150,7 @@ The three steps are deliberately separated so cheap, free, idempotent indexing (
 
 1. Prefer `search --json` before asking the user to locate screenshots manually; JSONL is the stable output for agents.
 2. Use `caption --dry-run` to see pending work when model credentials may be absent.
-3. Use `search --mode embedding --json` after `vdr sync` when semantic image or caption similarity is more useful than keyword matching.
+3. Use default `search --json` after `vdr sync` for hybrid caption/path plus VDR retrieval; use `--mode embedding` only when you need VDR-only results.
 4. Never pass `--apply` to rename unless the user requested actual file changes or an approved workflow requires it.
 5. If the user asks for an experiment, capture folder checks, `status`, selected captions, exact search commands, and top JSON results.
 

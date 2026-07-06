@@ -190,9 +190,9 @@ clawgallery skill path|print
 
 ## Search syntax
 
-`clawgallery search` scans the local JSONL state on every invocation and ranks matches by weighted fields: title matches outrank description matches, which outrank path-only matches. The default text output includes the familiar path/title/caption lines plus `score:` and `matches:` lines. Agents and brittle scripts should prefer `--json` for JSONL records, or `--no-fuzzy` to preserve the old exact substring output format.
+`clawgallery search` defaults to hybrid search: it scans local captions/paths with the keyword matcher and, when a VDR index exists, also queries the local embedding index and fuses both result lists. Title keyword matches outrank description matches, which outrank path-only matches; VDR matches can surface visually similar images even when the caption/path text does not contain the query. The default text output includes the familiar path/title/caption lines plus `score:` and `matches:` lines. Agents and brittle scripts should prefer `--json` for JSONL records, or `--no-fuzzy` to preserve the old exact substring output format.
 
-Pass `--mode embedding` to query the VDR index instead of the keyword matcher. Embedding search sends the query to the configured local embedding server, searches both image vectors and caption vectors, then returns the best matching vector per image. JSON output uses `source: "embedding"` and `matched_field: "embedding_image"` or `matched_field: "embedding_caption"`.
+Pass `--mode keyword` for caption/path keyword search only, or `--mode embedding` to query the VDR index only. Embedding search sends the query to the configured local embedding server, searches both image vectors and caption vectors, then returns the best matching vector per image. JSON output uses `source: "embedding"` and `matched_field: "embedding_image"` or `matched_field: "embedding_caption"` for VDR-only hits, and `source: "hybrid"` when default search fuses keyword and embedding evidence for the same path.
 
 Queries use nucleo/fzf-style operators:
 
@@ -229,7 +229,7 @@ CLAWGALLERY_PYTHON="$(uv tool dir)/mlx-embeddings/bin/python" \
   clawgallery vdr sync
 ```
 
-For embedding search, keep a persistent server running in another terminal:
+Search starts a managed MLX server automatically for the query embedding when a VDR index exists and no `--embedding-url` / `CLAWGALLERY_VDR_EMBEDDING_URL` is configured. To reuse a persistent server instead:
 
 ```bash
 # Terminal A

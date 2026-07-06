@@ -298,7 +298,7 @@ enum RenameStyle {
 #[derive(Debug, Args)]
 struct SearchArgs {
     /// Search backend to use.
-    #[arg(long, value_enum, default_value_t = SearchMode::Keyword)]
+    #[arg(long, value_enum, default_value_t = SearchMode::Hybrid)]
     mode: SearchMode,
     /// Query terms (combined as fzf-style query). See README for syntax.
     keywords: Vec<String>,
@@ -321,6 +321,7 @@ struct SearchArgs {
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum SearchMode {
+    Hybrid,
     Keyword,
     Embedding,
 }
@@ -1542,12 +1543,27 @@ struct SearchHit {
     source: HitSource,
 }
 
+#[derive(Debug, Clone)]
+struct SearchResult {
+    path_raw: PathBuf,
+    title: String,
+    description: String,
+    score: f64,
+    pattern_score: u32,
+    matched_field: String,
+    matched_atoms: Vec<String>,
+    source: HitSource,
+    discovered_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum HitSource {
     Fuzzy,
     Levenshtein,
     NoFuzzy,
+    Embedding,
+    Hybrid,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1916,6 +1932,156 @@ fn print_json_result(hit: &SearchHit, candidate: &SearchCandidate) -> Result<()>
     Ok(())
 }
 
+fn search_result_from_keyword_hit(hit: &SearchHit, candidate: &SearchCandidate) -> SearchResult {
+    SearchResult {
+        path_raw: candidate.path_raw.clone(),
+        title: candidate.title_nfc.clone(),
+        description: candidate.description_nfc.clone(),
+        score: hit.score,
+        pattern_score: hit.pattern_score,
+        matched_field: hit.matched_field.as_str().to_string(),
+        matched_atoms: hit.matched_atoms.clone(),
+        source: hit.source,
+        discovered_at: candidate.discovered_at,
+    }
+}
+
+fn search_result_from_embedding_hit(hit: clawgallery_vdr::EmbeddingSearchHit) -> SearchResult {
+    SearchResult {
+        path_raw: hit.path,
+        title: hit.title,
+        description: hit.description,
+        score: hit.score,
+        pattern_score: 0,
+        matched_field: hit.matched_field.to_string(),
+        matched_atoms: hit.matched_atoms,
+        source: HitSource::Embedding,
+        discovered_at: Utc::now(),
+    }
+}
+
+fn print_text_search_result(hit: &SearchResult) {
+    println!(
+        "{}\n  title: {}\n  caption: {}\n  score: {:.4}\n  matches: {} ({})",
+        hit.path_raw.display(),
+        hit.title,
+        hit.description,
+        hit.score,
+        hit.matched_field,
+        hit.matched_atoms.join(", ")
+    );
+}
+
+fn print_json_search_result(hit: &SearchResult) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string(&json!({
+            "path": hit.path_raw,
+            "title": hit.title,
+            "description": hit.description,
+            "score": hit.score,
+            "matched_field": hit.matched_field,
+            "matched_atoms": hit.matched_atoms,
+            "source": hit.source,
+        }))?
+    );
+    Ok(())
+}
+
+fn keyword_search_hits(
+    candidates: &[SearchCandidate],
+    query: &str,
+    args: &SearchArgs,
+) -> (Vec<SearchHit>, bool) {
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let mut hits = search_pattern_pass(candidates, query, &mut matcher, args.case_sensitive);
+    let query_atoms = extract_atom_payloads(query);
+    let mut used_fallback = false;
+    if hits.is_empty()
+        && !query_atoms.is_empty()
+        && !smart_case_sensitive(query, args.case_sensitive)
+        && query_atoms
+            .iter()
+            .any(|atom| fallback_threshold(atom).is_some())
+    {
+        hits = search_levenshtein_fallback(candidates, &query_atoms, args.case_sensitive);
+        used_fallback = !hits.is_empty();
+    }
+    sort_keyword_hits(&mut hits, candidates);
+    (hits, used_fallback)
+}
+
+fn sort_keyword_hits(hits: &mut [SearchHit], candidates: &[SearchCandidate]) {
+    hits.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| b.pattern_score.cmp(&a.pattern_score))
+            .then_with(|| {
+                candidates[b.candidate_idx]
+                    .discovered_at
+                    .cmp(&candidates[a.candidate_idx].discovered_at)
+            })
+            .then_with(|| {
+                candidates[a.candidate_idx]
+                    .path_raw
+                    .cmp(&candidates[b.candidate_idx].path_raw)
+            })
+    });
+}
+
+fn rrf_score(rank: usize) -> f64 {
+    1.0 / (60.0 + rank as f64 + 1.0)
+}
+
+fn merge_hybrid_results(
+    keyword_hits: &[SearchHit],
+    embedding_hits: Vec<clawgallery_vdr::EmbeddingSearchHit>,
+    candidates: &[SearchCandidate],
+    limit: usize,
+) -> Vec<SearchResult> {
+    let mut by_path: HashMap<PathBuf, SearchResult> = HashMap::new();
+    for (rank, hit) in keyword_hits.iter().enumerate() {
+        let candidate = &candidates[hit.candidate_idx];
+        let mut result = search_result_from_keyword_hit(hit, candidate);
+        result.score = rrf_score(rank);
+        by_path.insert(result.path_raw.clone(), result);
+    }
+    for (rank, hit) in embedding_hits.into_iter().enumerate() {
+        let contribution = rrf_score(rank);
+        let path = hit.path.clone();
+        match by_path.get_mut(&path) {
+            Some(existing) => {
+                existing.score += contribution;
+                existing.source = HitSource::Hybrid;
+                if !existing.matched_field.contains(hit.matched_field) {
+                    existing.matched_field =
+                        format!("{},{}", existing.matched_field, hit.matched_field);
+                }
+                for atom in hit.matched_atoms {
+                    if !existing.matched_atoms.contains(&atom) {
+                        existing.matched_atoms.push(atom);
+                    }
+                }
+            }
+            None => {
+                let mut result = search_result_from_embedding_hit(hit);
+                result.score = contribution;
+                by_path.insert(path, result);
+            }
+        }
+    }
+    let mut results: Vec<_> = by_path.into_values().collect();
+    results.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| b.pattern_score.cmp(&a.pattern_score))
+            .then_with(|| b.discovered_at.cmp(&a.discovered_at))
+            .then_with(|| a.path_raw.cmp(&b.path_raw))
+    });
+    results.truncate(limit);
+    results
+}
+
 fn cmd_search(paths: &AppPaths, args: SearchArgs) -> Result<()> {
     if args.keywords.is_empty() {
         bail!("provide at least one keyword");
@@ -1927,15 +2093,24 @@ fn cmd_search(paths: &AppPaths, args: SearchArgs) -> Result<()> {
     let captions = latest_captions_by_path(paths)?;
     let images = latest_images(paths)?;
     if matches!(args.mode, SearchMode::Embedding) {
-        return vdr::cmd_embedding_search(
+        let embedding_hits = vdr::embedding_search_hits(
             paths,
             &query,
             args.limit,
-            args.json,
             args.embedding_url.as_deref(),
+            false,
             images,
             captions,
-        );
+        )?;
+        for hit in embedding_hits {
+            let result = search_result_from_embedding_hit(hit);
+            if args.json {
+                print_json_search_result(&result)?;
+            } else {
+                print_text_search_result(&result);
+            }
+        }
+        return Ok(());
     }
     let candidates = build_candidates(images, &captions);
 
@@ -1971,46 +2146,47 @@ fn cmd_search(paths: &AppPaths, args: SearchArgs) -> Result<()> {
         return Ok(());
     }
 
-    let mut matcher = Matcher::new(Config::DEFAULT);
-    let mut hits = search_pattern_pass(&candidates, &query, &mut matcher, args.case_sensitive);
-    let query_atoms = extract_atom_payloads(&query);
-    let mut used_fallback = false;
-    if hits.is_empty()
-        && !query_atoms.is_empty()
-        && !smart_case_sensitive(&query, args.case_sensitive)
-        && query_atoms
-            .iter()
-            .any(|atom| fallback_threshold(atom).is_some())
-    {
-        hits = search_levenshtein_fallback(&candidates, &query_atoms, args.case_sensitive);
-        used_fallback = !hits.is_empty();
-    }
-
-    hits.sort_by(|a, b| {
-        b.score
-            .total_cmp(&a.score)
-            .then_with(|| b.pattern_score.cmp(&a.pattern_score))
-            .then_with(|| {
-                candidates[b.candidate_idx]
-                    .discovered_at
-                    .cmp(&candidates[a.candidate_idx].discovered_at)
-            })
-            .then_with(|| {
-                candidates[a.candidate_idx]
-                    .path_raw
-                    .cmp(&candidates[b.candidate_idx].path_raw)
-            })
-    });
+    let keyword_limit = if matches!(args.mode, SearchMode::Hybrid) {
+        args.limit.saturating_mul(5).max(args.limit)
+    } else {
+        args.limit
+    };
+    let (hits, used_fallback) = keyword_search_hits(&candidates, &query, &args);
 
     if used_fallback && !args.json {
         println!("(no fuzzy matches; falling back to typo-tolerant search)");
     }
-    for hit in hits.iter().take(args.limit) {
-        let candidate = &candidates[hit.candidate_idx];
-        if args.json {
-            print_json_result(hit, candidate)?;
-        } else {
-            print_text_result(hit, candidate);
+    if matches!(args.mode, SearchMode::Hybrid) {
+        let embedding_hits = vdr::embedding_search_hits(
+            paths,
+            &query,
+            keyword_limit,
+            args.embedding_url.as_deref(),
+            true,
+            latest_images(paths)?,
+            latest_captions_by_path(paths)?,
+        )?;
+        let results = merge_hybrid_results(
+            &hits.iter().take(keyword_limit).cloned().collect::<Vec<_>>(),
+            embedding_hits,
+            &candidates,
+            args.limit,
+        );
+        for result in results {
+            if args.json {
+                print_json_search_result(&result)?;
+            } else {
+                print_text_search_result(&result);
+            }
+        }
+    } else {
+        for hit in hits.iter().take(args.limit) {
+            let candidate = &candidates[hit.candidate_idx];
+            if args.json {
+                print_json_result(hit, candidate)?;
+            } else {
+                print_text_result(hit, candidate);
+            }
         }
     }
     Ok(())

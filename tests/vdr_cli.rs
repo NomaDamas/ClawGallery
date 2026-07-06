@@ -713,3 +713,62 @@ fn keyword_search_without_embedding_preserves_fuzzy_ranking() {
         "keyword search must not call embedding server"
     );
 }
+
+#[test]
+fn default_search_uses_hybrid_keyword_and_embedding_results() {
+    // Given: one keyword-visible image and one image only discoverable through VDR.
+    let server = FakeEmbeddingServer::start();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).expect("create images");
+    fs::write(images.join("literal-login.png"), b"login image bytes").expect("write login image");
+    fs::write(images.join("dog.png"), b"dog image bytes").expect("write dog image");
+    assert_success(run(&config, &["init"], server.url()));
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", images.to_str().expect("utf8")],
+        server.url(),
+    ));
+    let (login_id, login_path) = image_id_for(&config, "literal-login.png");
+    let (dog_id, dog_path) = image_id_for(&config, "dog.png");
+    write_caption(
+        &config,
+        &login_id,
+        &login_path,
+        "Login Dialog",
+        "A settings screen",
+    );
+    write_caption(
+        &config,
+        &dog_id,
+        &dog_path,
+        "Animal Photo",
+        "puppy playing outside",
+    );
+    assert_success(run(
+        &config,
+        &["vdr", "sync", "--dimensions", "4"],
+        server.url(),
+    ));
+
+    // When: search runs without --mode and asks for a semantic dog query.
+    let stdout = assert_success(run(
+        &config,
+        &["search", "dog", "--json", "--limit", "5"],
+        server.url(),
+    ));
+
+    // Then: the default search includes VDR hits, not just caption/fuzzy hits.
+    let rows: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("json result"))
+        .collect();
+    assert!(
+        rows.iter().any(
+            |row| row["path"].as_str().expect("path").ends_with("dog.png")
+                && (row["source"] == "embedding" || row["source"] == "hybrid")
+        ),
+        "default search should include embedding result, got: {stdout}"
+    );
+}

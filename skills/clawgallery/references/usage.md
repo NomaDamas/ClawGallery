@@ -8,8 +8,9 @@
 - Poll: `clawgallery poll --once` or `clawgallery poll --interval 30`
 - Preview caption work: `clawgallery caption --dry-run`
 - Caption missing images: `clawgallery caption --missing`
-- Search captions/paths: `clawgallery search "<query>" --json --limit 5`
-- Search VDR embeddings: `clawgallery search --mode embedding "<query>" --json --limit 5`
+- Search captions/paths plus VDR when indexed: `clawgallery search "<query>" --json --limit 5`
+- Search captions/paths only: `clawgallery search --mode keyword "<query>" --json --limit 5`
+- Search VDR embeddings only: `clawgallery search --mode embedding "<query>" --json --limit 5`
 - Sync VDR embeddings: `clawgallery vdr sync`
 - Check VDR state: `clawgallery vdr status --json`
 - Rename preview: `clawgallery rename --dry-run`

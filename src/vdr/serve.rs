@@ -44,10 +44,11 @@ pub(crate) struct ManagedServer {
 
 impl ManagedServer {
     pub(crate) fn start(args: &ServeArgs) -> Result<Self> {
-        validate_bind_host(&args.host, args.allow_remote)?;
-        match args.backend {
-            ServeBackend::Mlx => start_python_server(args),
-        }
+        start_managed_server(args, true)
+    }
+
+    pub(crate) fn start_quiet(args: &ServeArgs) -> Result<Self> {
+        start_managed_server(args, false)
     }
 
     pub(crate) fn url(&self) -> &str {
@@ -62,6 +63,13 @@ impl Drop for ManagedServer {
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+fn start_managed_server(args: &ServeArgs, announce: bool) -> Result<ManagedServer> {
+    validate_bind_host(&args.host, args.allow_remote)?;
+    match args.backend {
+        ServeBackend::Mlx => start_python_server(args, announce),
     }
 }
 
@@ -80,7 +88,7 @@ fn run_python_server(args: &ServeArgs) -> Result<()> {
     Ok(())
 }
 
-fn start_python_server(args: &ServeArgs) -> Result<ManagedServer> {
+fn start_python_server(args: &ServeArgs, announce: bool) -> Result<ManagedServer> {
     let python = resolve_python(args.python.as_ref());
     let port = if args.port == 0 {
         choose_available_port(&args.host)?
@@ -88,11 +96,18 @@ fn start_python_server(args: &ServeArgs) -> Result<ManagedServer> {
         args.port
     };
     let url = format!("http://{}:{port}", args.host);
-    println!("starting managed mlx embedding server at {url}");
+    if announce {
+        println!("starting managed mlx embedding server at {url}");
+    }
+    let stderr = if announce {
+        Stdio::inherit()
+    } else {
+        Stdio::null()
+    };
     let mut child = python_command(args, &python, port)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
+        .stderr(stderr)
         .spawn()
         .with_context(|| format!("failed to start Python interpreter {}", python.display()))?;
     if let Err(err) = wait_until_embed_reachable(&mut child, &url, &args.model, args.dimensions) {
