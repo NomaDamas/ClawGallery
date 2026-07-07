@@ -37,30 +37,32 @@ Initialize state, register folders, then bootstrap image records:
 clawgallery init
 clawgallery folder add ~/Pictures
 test -d ~/Pictures/screenshots && clawgallery folder add ~/Pictures/screenshots
-test -d ~/Picutres/screenshots && clawgallery folder add ~/Picutres/screenshots
 clawgallery bootstrap
 clawgallery status
 ```
 
 Use `clawgallery bootstrap --prune` when files may have been deleted or moved outside ClawGallery.
 
-## Caption images
+## Caption model setup
 
-Check pending caption work:
+Captioning writes titles/descriptions to `captions.jsonl` and may call paid/remote model APIs. Always preview the target set first:
 
 ```bash
 clawgallery caption --dry-run
 ```
 
-Caption uncaptured images when the user approved model calls:
+Default provider is OpenAI-compatible (`OPENAI_API_KEY`, optional `OPENAI_BASE_URL`, default model from config / `CLAWGALLERY_MODEL`). Codex auth may be reused from `$CODEX_HOME/auth.json` or `~/.codex/auth.json`. Gemini uses `GEMINI_API_KEY`:
 
 ```bash
-clawgallery caption --missing
+clawgallery caption --missing --provider openai-compatible --model gpt-4.1-mini
+clawgallery caption --missing --provider gemini --model gemini-2.5-flash
 ```
+
+Use `--file <path>` for one image, `--concurrency <n>` for bulk throughput, and `--max-retries <n>` for transient failures. Do not run bulk `caption --missing` unless the user explicitly approved model calls.
 
 ## Search
 
-Hybrid caption/path + VDR search (default):
+Default search is hybrid: caption/path keyword search plus VDR embedding search when `vdr.sqlite3` has active vectors. Prefer JSONL for agent workflows:
 
 ```bash
 clawgallery search "login error" --limit 5 --json
@@ -71,7 +73,7 @@ clawgallery search "!error" "^login"
 
 Search atoms follow fzf-like rules for the keyword side: whitespace means AND, `'foo` exact substring, `^foo` prefix, `foo$` suffix, `!foo` exclusion, and `\ ` literal space. When a VDR index exists, default search also runs embedding search and fuses both rankings. Add `--mode keyword` for caption/path keyword search only, `--mode embedding` for VDR only, or `--no-fuzzy` for old exact-substring behavior.
 
-## VDR embedding search
+## VDR model setup
 
 Default managed MLX path (`qnguyen3/colqwen2.5-v0.2-mlx`, dimensions `128`):
 
@@ -79,12 +81,39 @@ Default managed MLX path (`qnguyen3/colqwen2.5-v0.2-mlx`, dimensions `128`):
 uv tool install mlx-embeddings --with pillow --with torch --with torchvision
 CLAWGALLERY_PYTHON="$(uv tool dir)/mlx-embeddings/bin/python" \
   clawgallery vdr sync
-clawgallery search "github actions" --json
+clawgallery vdr status --json
 ```
 
 `clawgallery vdr sync` starts the packaged MLX `/embed` daemon automatically when no `--embedding-url` and no `CLAWGALLERY_VDR_EMBEDDING_URL` are configured, waits for it, lets the model runtime download/cache weights as needed, indexes active images, and terminates it before exit. Default search and `--mode embedding` also start a managed MLX server automatically for the query embedding when an index exists and no compatible endpoint is configured. Pass `--no-auto-start` to require an external server during sync.
 
 The inference runtime is Rust-managed but MLX/Python-based because maintained ColQwen-family late-interaction model runtimes on macOS are not currently available as a low-risk pure Rust stack. Storage remains ClawGallery's embedded SQLite multi-vector store with Rust-side MaxSim scoring.
+
+If Hugging Face xet downloads stall on macOS, retry the first sync with:
+
+```bash
+HF_HUB_DISABLE_XET=1 CLAWGALLERY_PYTHON="$(uv tool dir)/mlx-embeddings/bin/python" \
+  clawgallery vdr sync --prune
+```
+
+Use `--model`, `--dimensions`, `--device`, `--python`, or `--embedding-url` only when you intentionally need a non-default compatible embedding endpoint.
+
+## End-to-end caption + VDR + search
+
+For a real library update, run the full pipeline in this order:
+
+```bash
+clawgallery init
+clawgallery folder add ~/Pictures
+clawgallery bootstrap --prune
+clawgallery caption --dry-run
+clawgallery caption --missing
+CLAWGALLERY_PYTHON="$(uv tool dir)/mlx-embeddings/bin/python" clawgallery vdr sync --prune
+clawgallery search "visual query here" --json --limit 10
+```
+
+`caption --missing` enriches title/description for keyword search and rename. `vdr sync` embeds active images and captions into `vdr.sqlite3`. Plain `search` then uses hybrid retrieval; use `--mode keyword` or `--mode embedding` only to isolate one side during debugging.
+
+## VDR compatibility options
 
 Legacy ColQwen2 external-server path (`vidore/colqwen2-v1.0`, dimensions `128`):
 
@@ -104,6 +133,18 @@ clawgallery search --mode embedding "github actions" --json
 ```
 
 Jina search must use the same model and dimensions as the synced VDR index. The Jina server enables Hugging Face `trust_remote_code`; if Hugging Face xet downloads stall on macOS, retry the first run with `HF_HUB_DISABLE_XET=1`.
+
+## Dedup
+
+`dedup` reports duplicate candidates; it does not delete files.
+
+```bash
+clawgallery dedup --exact --json
+clawgallery vdr sync --prune
+clawgallery dedup --similar --threshold 0.95 --json
+```
+
+Use `--exact` for identical `sha256` groups. Use `--similar` after VDR sync for visually similar images. Review JSON output first; if the user explicitly wants removal, delete only chosen duplicates with `clawgallery forget --file <path> --delete` or untrack without deleting via `clawgallery forget --file <path>`. Never bulk-delete dedup candidates without confirmation.
 
 ## Safe rename
 

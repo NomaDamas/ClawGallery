@@ -13,6 +13,10 @@
 - Search VDR embeddings only: `clawgallery search --mode embedding "<query>" --json --limit 5`
 - Sync VDR embeddings: `clawgallery vdr sync`
 - Check VDR state: `clawgallery vdr status --json`
+- Full enrich + retrieve: `clawgallery caption --missing && clawgallery vdr sync --prune && clawgallery search "<query>" --json`
+- Report exact duplicates: `clawgallery dedup --exact --json`
+- Report visual duplicates: `clawgallery dedup --similar --threshold 0.95 --json`
+- Remove a reviewed duplicate: `clawgallery forget --file <path> --delete`
 - Rename preview: `clawgallery rename --dry-run`
 - Rename apply: `clawgallery rename --apply`
 
