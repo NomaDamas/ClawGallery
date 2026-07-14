@@ -350,6 +350,13 @@ ClawGallery ships a skill so agents can drive it safely. Every command supports 
 
 ---
 
+## Community
+
+- Contributing: [CONTRIBUTING.md](CONTRIBUTING.md)
+- Code of conduct: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
+- Security: [SECURITY.md](SECURITY.md)
+- Changelog: [CHANGELOG.md](CHANGELOG.md)
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
