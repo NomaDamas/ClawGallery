@@ -1,78 +1,211 @@
+<div align="center">
+
+<img src="assets/clawgallery-hero.jpg" alt="ClawGallery - a lobster curator sorting and inspecting artworks in a museum" width="100%">
+
 # ClawGallery
 
-ClawGallery is a Rust CLI for an agent-native screenshot gallery. It registers screenshot/image folders, bootstraps and polls for new images, stores metadata in JSONL, can call a visual-understanding model for titles/captions, safely renames files, and supports keyword search.
+**A friendly, agent-native gallery for all your screenshots and photos.**
 
-Supported image extensions are `png`, `jpg`, `jpeg`, `webp`, `avif`, `gif`, `heic`, and `heif`. HEIC/HEIF files are tracked like other images; captioning converts them to JPEG before sending them to the configured vision provider. On macOS the default converter is `sips`; set `CLAWGALLERY_HEIC_CONVERTER` to an executable that accepts `<input> <output>` to use another converter.
+</div>
 
-## Install / build
+---
+
+## What is ClawGallery?
+
+Your screenshots folder is a mess. Hundreds of `Screenshot 2025-11-01 at 14.32.55.png` and `IMG_0034.jpg` files, and no way to find the one you actually need.
+
+ClawGallery is a small, fast command-line tool that turns that pile into a searchable gallery. Think of it as a tidy little lobster curator that:
+
+- **Indexes** the image folders you point it at.
+- **Understands** what's in each picture using a vision model, writing a title and caption for it.
+- **Searches** by keyword *or* by visual meaning ("that login error screen") so you can find images even when the filename says nothing.
+- **Renames** auto-generated filenames into human-readable ones — safely, with a dry-run by default.
+- **Deduplicates**, finding exact and visually-similar copies.
+
+Everything is stored as plain, append-only JSONL files on your own machine. No cloud, no database daemon, no lock-in. It's built to be driven by both humans and AI agents (every command speaks `--json`).
+
+Supported formats: `png`, `jpg`, `jpeg`, `webp`, `avif`, `gif`, `heic`, `heif`. HEIC/HEIF images are converted to JPEG automatically before captioning (macOS uses `sips` by default; set `CLAWGALLERY_HEIC_CONVERTER` to use a different tool).
+
+---
+
+## Install
 
 ```bash
+# Build, test, and install into your PATH
 make ci
 cargo install --path .
 ```
 
-## Release checklist
+> **Enjoying ClawGallery? Please star the repo!** ⭐️
+> It genuinely helps the project grow. If you have the GitHub CLI installed, it's one command:
+>
+> ```bash
+> gh repo star NomaDamas/ClawGallery
+> ```
 
-Before publishing a release, verify the package surface and the user-facing CLI:
-
-- `cargo fmt --all -- --check`
-- `cargo clippy --all-targets --all-features -- -D warnings`
-- `cargo test --all-features`
-- `cargo package --allow-dirty --no-verify --list`
-- `cargo package -p clawgallery-vdr`
-- `cargo package -p clawgallery` after `clawgallery-vdr` is published or otherwise available to the registry resolver
-- `cargo run -- --help`
-- `cargo run -- vdr --help`
-- `cargo run -- daemon --help`
-
-Check that `Cargo.toml` includes the current version, repository, license, README, keywords, categories, and versioned workspace dependencies. Publish or verify `clawgallery-vdr` before verifying or publishing the root `clawgallery` crate, because the CLI package depends on the library crate by version. Re-read the Quickstart, command list, VDR setup, daemon notes, rename safety, auth, and state-file sections for consistency with CLI help before tagging.
-
-### First crates.io release
-
-Trusted Publishing requires the crate to exist before the trusted publisher is configured. For the first release, publish manually with a crates.io API token:
-
-```bash
-cargo publish -p clawgallery-vdr
-cargo publish -p clawgallery
-```
-
-Wait for `clawgallery-vdr` to appear in the crates.io index before publishing `clawgallery`; otherwise the root package cannot resolve its versioned library dependency.
-
-After the first release, configure Trusted Publishing for both crates on crates.io with:
-
-- repository: `NomaDamas/ClawGallery`
-- workflow: `.github/workflows/publish.yml`
-- environment: `crates-io`
-
-Future publishes should be created from a GitHub Release. The publish workflow authenticates with crates.io through GitHub OIDC, publishes `clawgallery-vdr`, waits for the registry index, then publishes `clawgallery`.
+---
 
 ## Quickstart
 
+Get from zero to a searchable gallery in a few commands:
+
 ```bash
-clawgallery init
-clawgallery folder add ~/Desktop
-clawgallery bootstrap
-clawgallery search screenshot --json
-clawgallery caption --dry-run
-clawgallery rename --dry-run
+clawgallery init                    # set up local state
+clawgallery folder add ~/Desktop    # tell it where your images live
+clawgallery bootstrap               # scan the folders and index images
+clawgallery search screenshot       # search by keyword right away
 ```
 
-Semantic image search through local VDR with the packaged MLX daemon on macOS:
+Want AI-generated titles and captions, then cleaner filenames? Preview first (everything below is a safe dry-run):
+
+```bash
+clawgallery caption --dry-run       # see what would be captioned
+clawgallery rename --dry-run        # see the filename suggestions
+```
+
+When you're happy, drop `--dry-run` (and add `--apply` to actually rename files).
+
+---
+
+## Everyday usage
+
+### 1. Point it at your images
+
+```bash
+clawgallery folder add ~/Pictures
+clawgallery folder add ~/Pictures/screenshots --recursive
+clawgallery folder list
+clawgallery bootstrap               # add --prune to drop files deleted on disk
+```
+
+### 2. Caption your images
+
+Captioning asks a vision model to describe each image, which powers better search and renaming. It can call a paid API, so **always preview first**:
+
+```bash
+clawgallery caption --dry-run
+clawgallery caption --missing       # caption everything not yet captioned
+clawgallery caption --file ~/Pictures/one.png
+```
+
+You'll need credentials for a provider (see [Vision model setup](#vision-model-setup)).
+
+### 3. Search
+
+By default, search is **hybrid**: it matches captions and filenames by keyword *and*, if you've built a visual index, finds images that *look* like your query.
+
+```bash
+clawgallery search "login error"
+clawgallery search "login error" --json --limit 5
+clawgallery search --mode keyword "github actions"    # text only
+clawgallery search --mode embedding "sunset photo"    # visual only
+```
+
+Search understands fzf-style operators:
+
+| Syntax | Meaning | Example |
+|---|---|---|
+| `foo bar` | Match both terms (fuzzy) | `clawgallery search login error` |
+| `'foo` | Exact substring | `clawgallery search "'github"` |
+| `^foo` | Starts with | `clawgallery search ^Login` |
+| `foo$` | Ends with | `clawgallery search modal$` |
+| `!foo` | Exclude | `clawgallery search login !test` |
+| `\ ` | Literal space | `clawgallery search github\ actions` |
+
+Lowercase queries are case-insensitive; add an uppercase letter (or `--case-sensitive`) to match case exactly. If nothing matches, ClawGallery automatically retries with typo tolerance. Use `--no-fuzzy` for plain exact-substring output.
+
+### 4. Rename messy filenames
+
+ClawGallery only renames files that *look* auto-generated (like `IMG_0034` or `Screenshot 2025-…`) and leaves your meaningful names alone. It never overwrites existing files and is **dry-run by default**:
+
+```bash
+clawgallery rename --dry-run        # preview
+clawgallery rename --apply          # actually rename
+clawgallery rename --undo --last    # undo the last applied rename
+```
+
+More on how it stays safe in [Rename safety](#rename-safety).
+
+### 5. Find duplicates
+
+`dedup` only *reports* — it never deletes anything:
+
+```bash
+clawgallery dedup                   # exact duplicates (same content)
+clawgallery vdr sync                # build the visual index first
+clawgallery dedup --similar --threshold 0.95 --json
+```
+
+To remove a duplicate you chose yourself: `clawgallery forget --file <path> --delete` (or omit `--delete` to just stop tracking it).
+
+### 6. Keep it up to date automatically
+
+Poll a folder for new images on an interval:
+
+```bash
+clawgallery poll --interval 30
+clawgallery poll --interval 30 --caption --sync   # also caption + reindex each pass
+```
+
+`--caption` captions new images each pass; `--sync` then updates the visual index. Failures are logged to `errors.jsonl` and reported without stopping the loop.
+
+Or run it as a background service (see [Run as a background service](#run-as-a-background-service)).
+
+---
+
+## Visual search (VDR)
+
+"Visual Document Retrieval" is what lets ClawGallery find images by how they *look*, not just by their captions. It's optional — plain keyword search works without it — but it's what makes "find that screenshot of the error dialog" work even when the filename is garbage.
+
+### How it works
+
+ClawGallery stores image embeddings in an embedded SQLite file (`vdr.sqlite3`) right alongside your other state. No separate vector database, no extra daemon to babysit. Building the index is incremental: unchanged images and captions are skipped, and only new or changed content is re-embedded.
+
+The embedding model itself runs in Python (the best late-interaction ColQwen-family runtimes on macOS are MLX/Python-based), but ClawGallery starts, waits for, and shuts down that runtime for you.
+
+### Setup (macOS, recommended)
 
 ```bash
 brew install rust uv
 cargo install --path .
+
+# Install the embedding runtime once
 uv tool install mlx-embeddings --with pillow --with torch --with torchvision
+
+# Build the visual index — ClawGallery starts the model server automatically
 CLAWGALLERY_PYTHON="$(uv tool dir)/mlx-embeddings/bin/python" clawgallery vdr sync
-# Terminal A: keep a compatible embedding server running for search
-CLAWGALLERY_PYTHON="$(uv tool dir)/mlx-embeddings/bin/python" clawgallery vdr serve --backend mlx
-# Terminal B
+```
+
+Then just search — the query is embedded automatically:
+
+```bash
+clawgallery search "login error"              # hybrid (keyword + visual)
+clawgallery search --mode embedding "sunset"  # visual only
+clawgallery vdr status --json
+```
+
+The default model is `qnguyen3/colqwen2.5-v0.2-mlx` (128 dimensions). The first run downloads and caches model weights. If Hugging Face downloads stall on macOS, retry with `HF_HUB_DISABLE_XET=1`.
+
+### Using your own embedding server
+
+To reuse a long-running server instead of the managed one, point ClawGallery at it and it won't auto-start anything:
+
+```bash
+# Terminal A: keep a server running
+CLAWGALLERY_PYTHON="$(uv tool dir)/mlx-embeddings/bin/python" \
+  clawgallery vdr serve --backend mlx --host 127.0.0.1 --port 8765
+
+# Terminal B: sync and search against it
+clawgallery vdr sync --embedding-url http://127.0.0.1:8765
 clawgallery search --mode embedding "login error" --json
 ```
 
-The MLX path uses `mlx-embeddings` with the late-interaction ColQwen2.5 model `qnguyen3/colqwen2.5-v0.2-mlx`. By default, `clawgallery vdr sync` starts ClawGallery's packaged Python `/embed` daemon on a loopback port, waits until it is reachable, lets the model runtime download/cache weights as needed, indexes active images, and terminates the daemon before exiting. Pass `--embedding-url` or set `CLAWGALLERY_VDR_EMBEDDING_URL` to use an already-running compatible server instead, or pass `--no-auto-start` to keep the old external-server requirement. `clawgallery vdr serve --backend mlx` remains available for a long-running manual daemon, and embedding search still needs one because the query text must also be embedded. The daemon binds to `127.0.0.1` by default and refuses non-loopback hosts unless `--allow-remote` is passed.
+You can also set `CLAWGALLERY_VDR_EMBEDDING_URL` instead of passing `--embedding-url`. The managed server binds to `127.0.0.1` and refuses non-loopback hosts unless you pass `--allow-remote`.
 
-Legacy ColQwen2 server path (default VDR model: `vidore/colqwen2-v1.0`, dimensions `128`):
+<details>
+<summary>Other embedding backends (ColQwen2, Jina Omni)</summary>
+
+**Legacy ColQwen2** (`vidore/colqwen2-v1.0`, 128 dims):
 
 ```bash
 uv pip install colpali-engine torch pillow
@@ -81,7 +214,7 @@ clawgallery vdr sync --no-auto-start --model vidore/colqwen2-v1.0 --dimensions 1
 clawgallery search --mode embedding "login error" --json
 ```
 
-Alternative Jina Omni embedding path:
+**Jina Omni** (`jinaai/jina-embeddings-v5-omni-small`, 1024 dims):
 
 ```bash
 python scripts/jina_omni_server.py --device auto
@@ -89,74 +222,103 @@ clawgallery vdr sync --no-auto-start --model jinaai/jina-embeddings-v5-omni-smal
 clawgallery search --mode embedding "login error" --json
 ```
 
-Jina search must use the same model and dimensions as the synced VDR index. The Jina server enables Hugging Face `trust_remote_code`; if Hugging Face xet downloads stall on macOS, retry the first run with `HF_HUB_DISABLE_XET=1`.
+Search must use the same model and dimensions as the synced index. The Jina server enables Hugging Face `trust_remote_code`; if xet downloads stall, retry with `HF_HUB_DISABLE_XET=1`.
 
-Continuous polling:
+The embedding server contract is a single `POST /embed`:
 
-```bash
-clawgallery poll --interval 30
-clawgallery poll --interval 30 --caption --sync
+```text
+{"model":"vidore/colqwen2-v1.0","dimensions":128,"inputs":[{"kind":"image|text|caption","role":"document|query","value":"path or text"}]}
 ```
 
-`--caption` runs missing-caption generation after each ingest pass. `--sync`
-then runs `vdr sync`, so `poll --once --caption --sync` performs one
-bootstrap -> caption -> VDR sync cycle. Caption or VDR failures are written to
-`errors.jsonl` and reported without stopping the poll loop.
+`kind` is `image` (path), `text`, or `caption`. For images, `value` is the file path (including `.heic`/`.heif`), so the server needs an HEIC decoder such as Pillow + `pillow-heif`.
 
-## State files
+</details>
 
-By default state is stored under `~/.config/clawgallery`:
+---
 
-- `config.json`
-- `folders.jsonl`
-- `images.jsonl`
-- `captions.jsonl`
-- `renames.jsonl`
-- `errors.jsonl`
-- `vdr.sqlite3`
+## Vision model setup
 
-Set `CLAWGALLERY_CONFIG_DIR=/path/to/state` to override this location.
-
-State is split across three append-only JSONL event logs joined by `image_id`:
-
-- `bootstrap` writes new `ImageRecord`s to `images.jsonl`. Pass `--prune` to also append `active=false` records for files that have disappeared from disk.
-- `caption` writes one `CaptionRecord` per successful run to `captions.jsonl`.
-- `rename --apply` writes a `RenameRecord` to `renames.jsonl` and appends a fresh `ImageRecord` with the new `path` (preserving the original `id` and `sha256`).
-- `forget --file <path>` appends an `active=false` `ImageRecord` for one tracked image; add `--delete` to remove the disk file first.
-
-Each downstream command (`search`, `status`, `caption`, `rename`) treats the latest record per path as authoritative and ignores `active=false` entries.
-
-## Visual model auth
-
-ClawGallery supports multiple vision providers via a unified abstraction.
+Captioning needs a vision-capable model. ClawGallery supports two providers.
 
 ### OpenAI-compatible (default)
 
-Uses OpenAI-compatible `/v1/responses` requests for image understanding.
+Uses `/v1/responses`-style requests.
 
-- `OPENAI_API_KEY`
-- `OPENAI_BASE_URL` (defaults to `https://api.openai.com/v1`)
-- `CLAWGALLERY_MODEL` (defaults to `gpt-4.1-mini`)
+- `OPENAI_API_KEY` — your key
+- `OPENAI_BASE_URL` — defaults to `https://api.openai.com/v1`
+- `CLAWGALLERY_MODEL` — defaults to `gpt-4.1-mini`
 
-Best-effort Codex auth reuse is supported by reading `$CODEX_HOME/auth.json` or `~/.codex/auth.json` for `OPENAI_API_KEY` or `tokens.access_token`.
+It can also reuse Codex credentials from `$CODEX_HOME/auth.json` or `~/.codex/auth.json`.
 
 ### Google Gemini
 
-Uses the Gemini Generative Language API.
+- `GEMINI_API_KEY` — your key
+- Default model: `gemini-2.5-flash`
 
-- `GEMINI_API_KEY`
-- Default model: `gemini-2.5-flash` (set via `--model` or config)
-
-### Switching providers
-
-Set the provider in config or override per-run:
+### Choosing a provider
 
 ```bash
 clawgallery caption --provider gemini --model gemini-2.5-flash
 clawgallery caption --provider openai-compatible --model gpt-4.1-mini
 ```
 
-## Commands
+---
+
+## How your data is stored
+
+Everything lives in `~/.config/clawgallery` by default (override with `CLAWGALLERY_CONFIG_DIR`):
+
+| File | What it holds |
+|---|---|
+| `config.json` | Your settings |
+| `folders.jsonl` | Registered folders |
+| `images.jsonl` | One record per discovered / pruned / renamed image |
+| `captions.jsonl` | One record per successful caption |
+| `renames.jsonl` | Rename history |
+| `errors.jsonl` | Logged failures (API keys redacted) |
+| `vdr.sqlite3` | The visual embedding index |
+
+The event logs are **append-only** and joined by `image_id`. This is deliberate: cheap, free, repeatable indexing (`bootstrap`) is kept separate from paid network calls (`caption`) and from irreversible file changes (`rename --apply`). Every command treats the newest record per file as the truth and ignores anything marked inactive.
+
+---
+
+## Rename safety
+
+Renaming files is the one thing that touches your disk, so it's cautious by design:
+
+- **Dry-run by default.** You must pass `--apply` to move files. Dry-runs never touch files or write history.
+- **Meaningful names are left alone.** Only auto-generated stems get renamed (`IMG_0034`, `PXL_20240316_080000123`, `Screenshot 2025-11-01 at 14.32.55`, `1696862563748`, `image (1)`, …). A local regex catches ~12 common camera/screenshot/messenger families for free; anything ambiguous triggers a text-only model check on the *filename* (no image content) whose answer is cached as `filename_meaningful` in `captions.jsonl`.
+- **No clobbering.** Unsafe characters are stripped, extensions preserved, and existing files are never overwritten.
+- **Batch-safe.** If a tracked file has vanished from disk, ClawGallery marks it inactive and keeps going. Per-file failures are logged and summarized (`renamed N, skipped M, failed K`) instead of aborting.
+
+```bash
+clawgallery rename --dry-run                    # preview the whole batch
+clawgallery rename --apply                       # apply
+clawgallery rename --apply --file one.png        # single file, skips the gate
+clawgallery rename --apply --force               # rename everything captioned
+clawgallery rename --undo --last                 # reverse the last apply
+```
+
+---
+
+## Run as a background service
+
+Install a user service that polls for new images continuously:
+
+```bash
+clawgallery daemon install --interval 30 --caption --sync
+clawgallery daemon start
+clawgallery daemon status
+clawgallery daemon logs
+clawgallery daemon stop
+clawgallery daemon uninstall
+```
+
+On macOS this is a LaunchAgent (`~/Library/LaunchAgents`); on Linux it's a `systemd --user` unit. Logs go to `daemon.log` in your config directory. Set `CLAWGALLERY_DAEMON_DIR` to write the service file elsewhere.
+
+---
+
+## Command reference
 
 ```text
 clawgallery init
@@ -180,98 +342,16 @@ clawgallery status
 clawgallery skill path|print
 ```
 
-## Daemon
+---
 
-`clawgallery daemon install` writes a user service that runs `clawgallery daemon run`, which records a small status file and then starts the poll loop. macOS uses a LaunchAgent plist under `~/Library/LaunchAgents`; Linux uses a `systemd --user` unit under the user config directory. Logs are written to `daemon.log` in the ClawGallery config directory, and `daemon status` reports the service file, log path, PID when known, and last start time. Set `CLAWGALLERY_DAEMON_DIR` to write the service file somewhere else for tests or managed deployments.
+## For AI agents
 
-## Dedup
+ClawGallery ships a skill so agents can drive it safely. Every command supports `--json` for stable, parseable output — prefer it. Run `clawgallery skill print` to load the guidance, and remember the safe defaults: `rename` never touches files without `--apply`, and bulk `caption --missing` may cost money, so preview with `--dry-run` first.
 
-`clawgallery dedup` reports duplicate candidates without deleting anything. With no mode flag it runs `--exact`, grouping active images that share the same `sha256`. Pass `--similar` to group active images whose VDR image embeddings meet `--threshold` (default `0.95`); `--exact` and `--similar` are mutually exclusive so each report has one clear grouping mode. Run `clawgallery vdr sync` first so the local VDR index exists. `--json` emits one JSON object per group with a representative image and duplicate candidates including scores.
+---
 
-## Search syntax
+## License
 
-`clawgallery search` defaults to hybrid search: it scans local captions/paths with the keyword matcher and, when a VDR index exists, also queries the local embedding index and fuses both result lists. Title keyword matches outrank description matches, which outrank path-only matches; VDR matches can surface visually similar images even when the caption/path text does not contain the query. The default text output includes the familiar path/title/caption lines plus `score:` and `matches:` lines. Agents and brittle scripts should prefer `--json` for JSONL records, or `--no-fuzzy` to preserve the old exact substring output format.
+Apache-2.0. See [LICENSE](LICENSE).
 
-Pass `--mode keyword` for caption/path keyword search only, or `--mode embedding` to query the VDR index only. Embedding search sends the query to the configured local embedding server, searches both image vectors and caption vectors, then returns the best matching vector per image. JSON output uses `source: "embedding"` and `matched_field: "embedding_image"` or `matched_field: "embedding_caption"` for VDR-only hits, and `source: "hybrid"` when default search fuses keyword and embedding evidence for the same path.
-
-Queries use nucleo/fzf-style operators:
-
-| Syntax | Meaning | Example |
-|---|---|---|
-| `foo bar` | AND-match both atoms fuzzily | `clawgallery search login error` |
-| `'foo` | Exact substring atom | `clawgallery search "'github"` |
-| `^foo` | Prefix atom | `clawgallery search ^Login` |
-| `foo$` | Suffix atom | `clawgallery search modal$` |
-| `!foo` | Exclude substring | `clawgallery search login !test` |
-| `!^foo`, `!foo$` | Exclude prefix/suffix | `clawgallery search !^Draft` |
-| `\ ` | Literal space inside an atom | `clawgallery search github\ actions` |
-
-Lowercase queries use smart-case matching; any uppercase atom becomes case-sensitive. Pass `--case-sensitive` to force case-sensitive matching. If the fuzzy pass returns no candidates, ClawGallery falls back to token/window typo tolerance for atoms of at least three characters. `--no-fuzzy` disables the DSL, fuzzy scoring, typo fallback, sorting, and score/matches output for compatibility with old scripts.
-
-## Visual Document Retrieval
-
-VDR stores image embeddings for every active image and stores caption embeddings only when an active image has caption text. The store is embedded SQLite so it needs no daemon, works well on macOS, and stays inside the same config directory as the JSONL state. `clawgallery vdr sync` is incremental: unchanged image and caption content hashes are skipped, changed files or captions are re-embedded, and `--prune` deactivates vectors for images that are no longer active after `bootstrap --prune`.
-
-The inference runtime is intentionally managed from Rust but not reimplemented in Rust: maintained ColQwen-family late-interaction model runtimes on macOS are currently MLX/Python-based. The vector store remains ClawGallery's embedded SQLite multi-vector store with Rust-side MaxSim scoring, avoiding a separate vector database daemon while preserving late-interaction rows.
-
-The local embedding server contract accepts `kind` values `image`, `text`, or `caption`; `caption` is caption-document text encoded like text. For image inputs, `value` is the image path, including `.heic`/`.heif` paths, so the embedding server must have any needed HEIC decoder such as Pillow plus `pillow-heif`. `role` is `document` or `query` and a compatible server may ignore it. Responses may contain either one vector per input or multi-vector embeddings per input.
-
-```text
-POST /embed
-{"model":"vidore/colqwen2-v1.0","dimensions":128,"inputs":[{"kind":"image|text|caption","role":"document|query","value":"path or text"}]}
-```
-
-The packaged macOS-optimized server uses `mlx-embeddings` with `qnguyen3/colqwen2.5-v0.2-mlx` and 128-dimensional late-interaction ColQwen2.5 embeddings. `clawgallery vdr sync` starts this server automatically when neither `--embedding-url` nor `CLAWGALLERY_VDR_EMBEDDING_URL` is provided:
-
-```bash
-uv tool install mlx-embeddings --with pillow --with torch --with torchvision
-CLAWGALLERY_PYTHON="$(uv tool dir)/mlx-embeddings/bin/python" \
-  clawgallery vdr sync
-```
-
-Search starts a managed MLX server automatically for the query embedding when a VDR index exists and no `--embedding-url` / `CLAWGALLERY_VDR_EMBEDDING_URL` is configured. To reuse a persistent server instead:
-
-```bash
-# Terminal A
-CLAWGALLERY_PYTHON="$(uv tool dir)/mlx-embeddings/bin/python" \
-  clawgallery vdr serve --backend mlx --host 127.0.0.1 --port 8765
-# Terminal B
-clawgallery search --mode embedding "login error" --json
-```
-
-The legacy local server uses `vidore/colqwen2-v1.0` with 128-dimensional ColQwen2 embeddings:
-
-```bash
-python scripts/colqwen2_server.py --host 127.0.0.1 --port 8765 --device auto
-```
-
-The alternative Jina Omni path uses `jinaai/jina-embeddings-v5-omni-small` through `sentence-transformers`, enables Hugging Face remote model code, and uses 1024 dimensions. Pass matching `--model jinaai/jina-embeddings-v5-omni-small --dimensions 1024` to `clawgallery vdr sync` when using it; embedding search should then query the same synced VDR index.
-
-```bash
-python scripts/jina_omni_server.py --host 127.0.0.1 --port 8765 --device auto
-clawgallery vdr sync --no-auto-start --model jinaai/jina-embeddings-v5-omni-small --dimensions 1024
-```
-
-If Hugging Face xet downloads stall on macOS, retry the first run with `HF_HUB_DISABLE_XET=1`.
-Set `CLAWGALLERY_VDR_EMBEDDING_URL` or pass `--embedding-url` to point the CLI at a different compatible local server; either setting disables managed auto-start for that sync run.
-
-## Rename safety
-
-Rename is dry-run by default. `--apply` is required to modify files. ClawGallery strips unsafe filename characters, preserves extensions, reserves suffix space for collisions, and refuses to overwrite existing files.
-
-Dry-run rename and undo previews are side-effect free: they do not move files and do not append `renames.jsonl` records. Only applied renames and applied undo operations are recorded in rename history.
-
-When `rename --apply` encounters a tracked path that no longer exists on disk (already renamed, deleted externally, etc.) it prints `would skip (missing source) <path>`, appends an `active=false` record so the entry stops following the live set, and continues with the rest of the batch. Per-image rename failures (collision, permission, IO) are logged to `errors.jsonl` and the run prints a final `renamed N, skipped M meaningful-looking name(s), failed K` summary instead of aborting on the first failure. API keys appearing in any error message (URL `?key=`, `Authorization: Bearer …`, raw `sk-…` / `AIza…` strings) are redacted before being written to `errors.jsonl` or stderr.
-
-Use `rename --undo --last` to reverse the latest applied rename, or add `--file <path>` to target one rename record. Undo reuses the same no-clobber file move, appends a reverse `RenameRecord`, marks the renamed path inactive, and appends the restored original `ImageRecord`. `--dry-run` previews the reverse move without touching files.
-
-### Meaningful-filename gate
-
-`rename` skips files whose current name already looks human-meaningful and only renames stems that look auto-generated (`IMG_0034`, `PXL_20240316_080000123`, `Screenshot 2025-11-01 at 14.32.55`, `1696862563748`, `image (1)`, etc.). Classification runs in two tiers:
-
-1. A pure local regex covers ~12 well-known camera, screenshot, messenger, and download families plus pure numeric stems and copy/sequence suffixes. A regex match means `Generic` and the stem is renamed without any model call.
-2. Anything that does not match the regex is tagged `NeedsModel`. During `caption`, ClawGallery makes a separate text-only model call that sees only the filename stem (no image content) and asks whether the stem looks human-authored or auto-generated. The boolean is cached in `captions.jsonl` (`filename_meaningful: bool`) so future `rename` runs reuse the answer.
-
-Pass `--force` to rename every captioned image regardless of name, or `--file <path>` to rename a single explicit target without consulting the gate.
-
-`caption` only announces metadata writes (`captioned <path>`); the gate decision lives in `rename`'s output (`dry-run X -> Y`, `would skip ...`, `renamed X -> Y`). To audit the cached gate verdict for a specific image, read `filename_meaningful` from `captions.jsonl`.
+If ClawGallery saved you from filename chaos, don't forget to **⭐️ star the repo** — `gh repo star NomaDamas/ClawGallery`. Thank you!
