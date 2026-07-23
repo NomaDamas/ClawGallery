@@ -9,15 +9,13 @@ use clawgallery_vdr::{
 };
 use std::{collections::HashMap, env, path::PathBuf};
 
+mod backend;
 mod serve;
 
+pub(crate) use backend::ServeBackend;
+use backend::{DEFAULT_MANAGED_HOST, DEFAULT_MLX_DIMENSIONS, DEFAULT_MLX_MODEL, resolve_backend};
 pub(crate) use clawgallery_vdr::SimilarImageGroup;
 pub(crate) use clawgallery_vdr::{DEFAULT_DIMENSIONS, DEFAULT_MAX_RETRIES, DEFAULT_VDR_MODEL};
-pub(crate) use serve::ServeBackend;
-
-const DEFAULT_MLX_MODEL: &str = "qnguyen3/colqwen2.5-v0.2-mlx";
-const DEFAULT_MLX_DIMENSIONS: usize = 128;
-const DEFAULT_MANAGED_HOST: &str = "127.0.0.1";
 
 #[derive(Debug, Args)]
 pub(crate) struct VdrArgs {
@@ -41,18 +39,18 @@ pub(crate) struct VdrSyncArgs {
     pub(crate) prune: bool,
     #[arg(long)]
     pub(crate) embedding_url: Option<String>,
-    #[arg(long, default_value = DEFAULT_MLX_MODEL)]
-    pub(crate) model: String,
-    #[arg(long, default_value_t = DEFAULT_MLX_DIMENSIONS)]
-    pub(crate) dimensions: usize,
+    #[arg(long)]
+    pub(crate) model: Option<String>,
+    #[arg(long)]
+    pub(crate) dimensions: Option<usize>,
     #[arg(long, default_value_t = DEFAULT_MAX_RETRIES)]
     pub(crate) max_retries: usize,
     #[arg(long, conflicts_with = "no_auto_start")]
     pub(crate) auto_start: bool,
     #[arg(long)]
     pub(crate) no_auto_start: bool,
-    #[arg(long, value_enum, default_value_t = serve::ServeBackend::Mlx)]
-    pub(crate) backend: serve::ServeBackend,
+    #[arg(long, value_enum)]
+    pub(crate) backend: Option<ServeBackend>,
     #[arg(long, default_value = DEFAULT_MANAGED_HOST)]
     pub(crate) host: String,
     #[arg(long, default_value_t = 0)]
@@ -73,16 +71,16 @@ struct VdrStatusArgs {
 
 #[derive(Debug, Args)]
 struct VdrServeArgs {
-    #[arg(long, value_enum, default_value_t = serve::ServeBackend::Mlx)]
-    backend: serve::ServeBackend,
+    #[arg(long, value_enum)]
+    backend: Option<ServeBackend>,
     #[arg(long, default_value = "127.0.0.1")]
     host: String,
     #[arg(long, default_value_t = 8765)]
     port: u16,
-    #[arg(long, default_value = DEFAULT_MLX_MODEL)]
-    model: String,
-    #[arg(long, default_value_t = DEFAULT_MLX_DIMENSIONS)]
-    dimensions: usize,
+    #[arg(long)]
+    model: Option<String>,
+    #[arg(long)]
+    dimensions: Option<usize>,
     #[arg(long, default_value = "auto")]
     device: String,
     #[arg(long)]
@@ -113,12 +111,13 @@ pub(crate) fn similar_image_groups(
 }
 
 fn cmd_serve(args: VdrServeArgs) -> Result<()> {
+    let backend = resolve_backend(args.backend, args.model.as_deref(), args.dimensions)?;
     serve::serve(serve::ServeArgs {
-        backend: args.backend,
+        backend: backend.backend,
         host: args.host,
         port: args.port,
-        model: args.model,
-        dimensions: args.dimensions,
+        model: backend.model,
+        dimensions: backend.dimensions,
         device: args.device,
         python: args.python,
         allow_remote: args.allow_remote,
@@ -126,12 +125,13 @@ fn cmd_serve(args: VdrServeArgs) -> Result<()> {
 }
 
 pub(crate) fn cmd_sync(paths: &AppPaths, args: VdrSyncArgs) -> Result<()> {
+    let backend = resolve_backend(args.backend, args.model.as_deref(), args.dimensions)?;
     let captions = crate::latest_captions_by_path(paths)?;
     let (images, refreshed_files) = crate::latest_images_refreshing_changed_files(paths)?;
     let config = SyncConfig {
         db_path: paths.vdr_db.clone(),
-        model: args.model.clone(),
-        dimensions: args.dimensions,
+        model: backend.model.clone(),
+        dimensions: backend.dimensions,
         embedding_url: args.embedding_url.clone(),
         max_retries: args.max_retries,
         prune: args.prune || refreshed_files,
@@ -143,11 +143,11 @@ pub(crate) fn cmd_sync(paths: &AppPaths, args: VdrSyncArgs) -> Result<()> {
             > 0;
     let managed_server = should_auto_start.then(|| {
         serve::ManagedServer::start(&serve::ServeArgs {
-            backend: args.backend,
+            backend: backend.backend,
             host: args.host.clone(),
             port: args.port,
-            model: args.model.clone(),
-            dimensions: args.dimensions,
+            model: backend.model.clone(),
+            dimensions: backend.dimensions,
             device: args.device.clone(),
             python: args.python.clone(),
             allow_remote: args.allow_remote,
@@ -211,10 +211,11 @@ pub(crate) fn embedding_search_hits(
         .model
         .unwrap_or_else(|| DEFAULT_MLX_MODEL.to_string());
     let dimensions = status.dimensions.unwrap_or(DEFAULT_MLX_DIMENSIONS);
+    let backend = resolve_backend(None, Some(&model), Some(dimensions))?;
     let env_embedding_url = env::var("CLAWGALLERY_VDR_EMBEDDING_URL").ok();
     let managed_server = if embedding_url.is_none() && env_embedding_url.is_none() {
         Some(serve::ManagedServer::start_quiet(&serve::ServeArgs {
-            backend: serve::ServeBackend::Mlx,
+            backend: backend.backend,
             host: DEFAULT_MANAGED_HOST.to_string(),
             port: 0,
             model: model.clone(),

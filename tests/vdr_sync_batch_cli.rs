@@ -22,12 +22,12 @@ fn vdr_sync_batches_large_pending_sets_into_single_input_requests() {
             "--dimensions",
             "4",
         ],
-        false,
+        None,
     ));
     let status = assert_success(run_without_embedding_url(
         &config,
         &["vdr", "status", "--json"],
-        false,
+        None,
     ));
 
     assert!(synced.contains("indexed 2"), "got: {synced}");

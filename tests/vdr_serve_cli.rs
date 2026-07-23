@@ -30,6 +30,50 @@ fn vdr_serve_mlx_help_is_packaged_for_installed_cli() {
 }
 
 #[test]
+fn vdr_serve_help_lists_jina_mlx_backend() {
+    // Given: the installed ClawGallery binary.
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    // When: the managed VDR server help is requested.
+    let output = Command::new(clawgallery_bin())
+        .env("CLAWGALLERY_CONFIG_DIR", temp.path().join("state"))
+        .args(["vdr", "serve", "--help"])
+        .output()
+        .expect("clawgallery command should run");
+
+    // Then: the new packaged backend is discoverable as a supported value.
+    assert!(output.status.success(), "serve help should succeed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("jina-mlx"), "got: {stdout}");
+}
+
+#[test]
+fn vdr_serve_jina_mlx_rejects_incompatible_dimensions() {
+    // Given: the Jina MLX backend with a ColQwen-sized vector request.
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    // When: the server is started with 128 dimensions.
+    let output = Command::new(clawgallery_bin())
+        .env("CLAWGALLERY_CONFIG_DIR", temp.path().join("state"))
+        .env("CLAWGALLERY_VDR_JINA_MLX_FAKE", "1")
+        .args([
+            "vdr",
+            "serve",
+            "--backend",
+            "jina-mlx",
+            "--dimensions",
+            "128",
+        ])
+        .output()
+        .expect("clawgallery command should run");
+
+    // Then: validation fails before a model process can start.
+    assert!(!output.status.success(), "invalid dimensions should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("requires 1024 dimensions"), "got: {stderr}");
+}
+
+#[test]
 fn vdr_serve_mlx_rejects_remote_bind_without_allow_remote() {
     // Given: a request to expose the unauthenticated local-file embedding server.
     let temp = tempfile::tempdir().expect("tempdir");

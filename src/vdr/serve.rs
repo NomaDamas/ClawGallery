@@ -1,5 +1,5 @@
+use super::backend::ServeBackend;
 use anyhow::{Context, Result, bail};
-use clap::ValueEnum;
 use serde_json::json;
 use std::{
     env,
@@ -11,11 +11,23 @@ use std::{
 };
 
 const MLX_SERVER: &str = include_str!("../../scripts/mlx_embeddings_server.py");
+const JINA_MLX_SERVER: &str = include_str!("../../scripts/jina_mlx_embeddings_server.py");
 const MANAGED_STARTUP_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub(crate) enum ServeBackend {
-    Mlx,
+impl ServeBackend {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Mlx => "mlx",
+            Self::JinaMlx => "jina-mlx",
+        }
+    }
+
+    const fn script(self) -> &'static str {
+        match self {
+            Self::Mlx => MLX_SERVER,
+            Self::JinaMlx => JINA_MLX_SERVER,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -32,9 +44,7 @@ pub(crate) struct ServeArgs {
 
 pub(crate) fn serve(args: ServeArgs) -> Result<()> {
     validate_bind_host(&args.host, args.allow_remote)?;
-    match args.backend {
-        ServeBackend::Mlx => run_python_server(&args),
-    }
+    run_python_server(&args)
 }
 
 pub(crate) struct ManagedServer {
@@ -68,9 +78,7 @@ impl Drop for ManagedServer {
 
 fn start_managed_server(args: &ServeArgs, announce: bool) -> Result<ManagedServer> {
     validate_bind_host(&args.host, args.allow_remote)?;
-    match args.backend {
-        ServeBackend::Mlx => start_python_server(args, announce),
-    }
+    start_python_server(args, announce)
 }
 
 fn run_python_server(args: &ServeArgs) -> Result<()> {
@@ -83,7 +91,10 @@ fn run_python_server(args: &ServeArgs) -> Result<()> {
         .status()
         .with_context(|| format!("failed to start Python interpreter {}", python.display()))?;
     if !status.success() {
-        bail!("mlx embedding server exited with {status}");
+        bail!(
+            "{} embedding server exited with {status}",
+            args.backend.name()
+        );
     }
     Ok(())
 }
@@ -97,7 +108,10 @@ fn start_python_server(args: &ServeArgs, announce: bool) -> Result<ManagedServer
     };
     let url = format!("http://{}:{port}", args.host);
     if announce {
-        println!("starting managed mlx embedding server at {url}");
+        println!(
+            "starting managed {} embedding server at {url}",
+            args.backend.name()
+        );
     }
     let stderr = if announce {
         Stdio::inherit()
@@ -122,7 +136,7 @@ fn python_command(args: &ServeArgs, python: &PathBuf, port: u16) -> Command {
     let mut command = Command::new(python);
     command
         .arg("-c")
-        .arg(MLX_SERVER)
+        .arg(args.backend.script())
         .arg("--host")
         .arg(&args.host)
         .arg("--port")
@@ -158,10 +172,10 @@ fn wait_until_embed_reachable(
     let deadline = Instant::now() + MANAGED_STARTUP_TIMEOUT;
     loop {
         if let Some(status) = child.try_wait()? {
-            bail!("managed mlx embedding server exited before it became reachable with {status}");
+            bail!("managed embedding server exited before it became reachable with {status}");
         }
         if Instant::now() >= deadline {
-            bail!("managed mlx embedding server at {url} did not become reachable");
+            bail!("managed embedding server at {url} did not become reachable");
         }
         let response = client
             .post(&endpoint)
@@ -191,7 +205,7 @@ fn validate_bind_host(host: &str, allow_remote: bool) -> Result<()> {
         return Ok(());
     }
     bail!(
-        "refusing to bind unauthenticated mlx embedding server to non-loopback host {host:?} without --allow-remote"
+        "refusing to bind unauthenticated embedding server to non-loopback host {host:?} without --allow-remote"
     );
 }
 

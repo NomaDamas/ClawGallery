@@ -25,7 +25,7 @@ fn vdr_auto_start_embedding_url_uses_external_server_without_managed_child() {
             "--dimensions",
             "4",
         ],
-        true,
+        Some("CLAWGALLERY_VDR_MLX_FAKE"),
     ));
 
     assert!(synced.contains("indexed 1"), "got: {synced}");
@@ -51,7 +51,7 @@ fn vdr_auto_start_no_auto_start_preserves_external_server_failure() {
             "--max-retries",
             "0",
         ],
-        false,
+        None,
     );
 
     assert!(
@@ -81,7 +81,7 @@ fn vdr_auto_start_missing_python_path_fails_cleanly() {
             "--dimensions",
             "4",
         ],
-        true,
+        Some("CLAWGALLERY_VDR_MLX_FAKE"),
     );
 
     assert!(!output.status.success(), "sync should fail");
