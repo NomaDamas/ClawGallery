@@ -88,6 +88,19 @@ clawgallery vdr status --json
 
 The inference runtime is Rust-managed but MLX/Python-based because maintained ColQwen-family late-interaction model runtimes on macOS are not currently available as a low-risk pure Rust stack. Storage remains ClawGallery's embedded SQLite multi-vector store with Rust-side MaxSim scoring.
 
+Managed Jina v5 Omni retrieval path for Apple Silicon (`jinaai/jina-embeddings-v5-omni-small-retrieval-mlx`, dimensions `1024`):
+
+```bash
+uv venv ~/.local/share/clawgallery/jina-mlx
+uv pip install --python ~/.local/share/clawgallery/jina-mlx/bin/python \
+  'mlx>=0.23' tokenizers huggingface_hub 'transformers>=4.57,<5' pillow \
+  torch torchvision requests librosa av
+CLAWGALLERY_PYTHON=~/.local/share/clawgallery/jina-mlx/bin/python \
+  clawgallery vdr sync --backend jina-mlx
+```
+
+The packaged runtime pins Hugging Face revision `049ae923674456656be891ebb22849dd58124994`. Search infers `jina-mlx` from the exact active index model ID, but `CLAWGALLERY_PYTHON` must still point at the Jina environment. The model is CC BY-NC 4.0 and restricted to noncommercial use.
+
 If Hugging Face xet downloads stall on macOS, retry the first sync with:
 
 ```bash
@@ -124,7 +137,7 @@ clawgallery vdr sync --no-auto-start --model vidore/colqwen2-v1.0 --dimensions 1
 clawgallery search --mode embedding "github actions" --json
 ```
 
-Alternative Jina Omni path:
+Alternative external SentenceTransformer Jina Omni path:
 
 ```bash
 python scripts/jina_omni_server.py --device auto
@@ -132,7 +145,7 @@ clawgallery vdr sync --no-auto-start --model jinaai/jina-embeddings-v5-omni-smal
 clawgallery search --mode embedding "github actions" --json
 ```
 
-Jina search must use the same model and dimensions as the synced VDR index. The Jina server enables Hugging Face `trust_remote_code`; if Hugging Face xet downloads stall on macOS, retry the first run with `HF_HUB_DISABLE_XET=1`.
+This external path is separate from the managed `jina-mlx` backend. Jina search must use the same model and dimensions as the synced VDR index. The Jina server enables Hugging Face `trust_remote_code`; if Hugging Face xet downloads stall on macOS, retry the first run with `HF_HUB_DISABLE_XET=1`.
 
 ## Dedup
 

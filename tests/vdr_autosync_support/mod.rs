@@ -11,10 +11,14 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-pub(crate) fn run_without_embedding_url(config: &Path, args: &[&str], mlx_fake: bool) -> Output {
+pub(crate) fn run_without_embedding_url(
+    config: &Path,
+    args: &[&str],
+    fake_env: Option<&str>,
+) -> Output {
     let mut command = Command::new(bin());
-    if mlx_fake {
-        command.env("CLAWGALLERY_VDR_MLX_FAKE", "1");
+    if let Some(name) = fake_env {
+        command.env(name, "1");
     }
     command
         .env("CLAWGALLERY_CONFIG_DIR", config)
@@ -39,11 +43,11 @@ pub(crate) fn image_library(image_names: &[&str]) -> (tempfile::TempDir, PathBuf
     for image_name in image_names {
         fs::write(images.join(image_name), format!("{image_name} bytes")).expect("write image");
     }
-    assert_success(run_without_embedding_url(&config, &["init"], false));
+    assert_success(run_without_embedding_url(&config, &["init"], None));
     assert_success(run_without_embedding_url(
         &config,
         &["bootstrap", "--path", images.to_str().expect("utf8")],
-        false,
+        None,
     ));
     (temp, config)
 }
