@@ -5,6 +5,17 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] — 2026-08-17
+
+### Fixed
+
+- Bootstrap is now truly incremental: unchanged files skip SHA-256, metadata-only touches keep `image_id`, and content overwrites reuse the same id
+- Captions are SHA-aware, so fake changes do not recaption and overwritten bytes mark the old caption stale
+- `caption --file` binds `source_sha256` to the live file bytes and pre-bootstrap captions keep working after later bootstrap
+- VDR consumes bootstrap state instead of rehashing the library, streams hashes, and replaces vectors atomically
+
+[0.1.2]: https://github.com/NomaDamas/ClawGallery/releases/tag/v0.1.2
+
 ## [0.1.0] — 2026-07-03
 
 First public release on crates.io (`clawgallery`, `clawgallery-vdr`).
