@@ -231,11 +231,10 @@ pub(crate) fn latest_captions_by_path(paths: &AppPaths) -> Result<HashMap<PathBu
         .into_iter()
         .filter(|(path, caption)| {
             images.get(path).is_some_and(|image| {
-                caption.image_id == image.id
-                    && caption
-                        .source_sha256
-                        .as_deref()
-                        .is_none_or(|sha256| sha256 == image.sha256)
+                caption.source_sha256.as_deref().map_or_else(
+                    || caption.image_id == image.id,
+                    |sha256| sha256 == image.sha256,
+                )
             })
         })
         .collect())

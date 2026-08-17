@@ -5,6 +5,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
@@ -213,6 +214,41 @@ fn legacy_caption_for_replaced_image_id_is_not_current() {
     // Then: the replaced id cannot make the current image look captioned.
     assert!(search.trim().is_empty(), "stale caption leaked: {search}");
     assert!(missing.contains("would caption"), "got: {missing}");
+}
+
+#[test]
+fn sha_matched_caption_created_before_bootstrap_remains_current() {
+    // Given: `caption --file` state created before the image is bootstrapped.
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    let image = temp.path().join("screen.png");
+    let bytes = b"captioned before bootstrap";
+    fs::write(&image, bytes).unwrap();
+    assert_success(run(&config, &["init"]));
+    let caption = serde_json::json!({
+        "image_id": "transient-caption-image-id",
+        "path": image.canonicalize().unwrap(),
+        "source_sha256": format!("{:x}", Sha256::digest(bytes)),
+        "title": "Pre Bootstrap Caption",
+        "description": "Still valid for the identical file bytes",
+        "model": "test",
+        "provider": "test",
+        "created_at": "2026-08-17T00:00:00Z",
+        "filename_meaningful": false
+    });
+    fs::write(config.join("captions.jsonl"), format!("{caption}\n")).unwrap();
+
+    // When: bootstrap later assigns the persisted image id for the same bytes.
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", image.to_str().unwrap()],
+    ));
+    let search = assert_success(run(&config, &["search", "Pre Bootstrap Caption"]));
+    let rename = assert_success(run(&config, &["rename", "--dry-run"]));
+
+    // Then: the SHA-bound caption remains usable despite its transient image id.
+    assert!(search.contains("screen.png"), "caption was lost: {search}");
+    assert!(rename.contains("dry-run"), "caption was lost: {rename}");
 }
 
 #[test]
