@@ -127,14 +127,14 @@ fn cmd_serve(args: VdrServeArgs) -> Result<()> {
 pub(crate) fn cmd_sync(paths: &AppPaths, args: VdrSyncArgs) -> Result<()> {
     let backend = resolve_backend(args.backend, args.model.as_deref(), args.dimensions)?;
     let captions = crate::latest_captions_by_path(paths)?;
-    let (images, refreshed_files) = crate::latest_images_refreshing_changed_files(paths)?;
+    let images = crate::latest_images(paths)?;
     let config = SyncConfig {
         db_path: paths.vdr_db.clone(),
         model: backend.model.clone(),
         dimensions: backend.dimensions,
         embedding_url: args.embedding_url.clone(),
         max_retries: args.max_retries,
-        prune: args.prune || refreshed_files,
+        prune: args.prune,
     };
     let image_documents = image_documents(&images);
     let caption_documents = caption_documents_from_map(captions);

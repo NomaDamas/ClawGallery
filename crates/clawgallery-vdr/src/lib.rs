@@ -151,6 +151,7 @@ pub fn sync(
         }
         indexed_vectors += response.embeddings.len();
         for (item, vector) in batch.iter().zip(response.embeddings) {
+            store::deactivate_stale_vectors(&conn, &item.image_id, &item.sha256)?;
             store::deactivate_existing_kind(&conn, &item.image_id, item.kind)?;
             store::insert_vector(&conn, item, &response.model, config.dimensions, &vector)?;
         }

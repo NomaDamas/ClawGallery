@@ -7,7 +7,7 @@ use std::{
     env,
     ffi::OsStr,
     fs::{self, File, OpenOptions},
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
 };
 use uuid::Uuid;
@@ -117,18 +117,19 @@ fn default_active() -> bool {
     true
 }
 
-impl ImageRecord {
-    pub(crate) fn has_same_file_fingerprint(&self, other: &Self) -> bool {
-        self.sha256 == other.sha256
-            && self.size == other.size
-            && self.modified_at == other.modified_at
-    }
+pub(crate) enum ImageRefresh {
+    Unchanged,
+    MetadataOnly(ImageRecord),
+    ContentChanged(ImageRecord),
+    New(ImageRecord),
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct CaptionRecord {
     pub(crate) image_id: String,
     pub(crate) path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) source_sha256: Option<String>,
     pub(crate) title: String,
     pub(crate) description: String,
     pub(crate) model: String,
@@ -212,26 +213,6 @@ pub(crate) fn latest_images_by_path(paths: &AppPaths) -> Result<HashMap<PathBuf,
         .collect())
 }
 
-pub(crate) fn latest_images_refreshing_changed_files(
-    paths: &AppPaths,
-) -> Result<(Vec<ImageRecord>, bool)> {
-    let mut images = latest_images(paths)?;
-    let mut refreshed = false;
-    for image in &mut images {
-        if !image.path.exists() {
-            continue;
-        }
-        let current = build_image_record(&image.path)?;
-        if image.has_same_file_fingerprint(&current) {
-            continue;
-        }
-        append_jsonl(&paths.images, &current)?;
-        *image = current;
-        refreshed = true;
-    }
-    Ok((images, refreshed))
-}
-
 fn all_latest_images_by_path(paths: &AppPaths) -> Result<HashMap<PathBuf, ImageRecord>> {
     let mut images = HashMap::new();
     for image in read_jsonl::<ImageRecord>(&paths.images)? {
@@ -245,6 +226,24 @@ pub(crate) fn latest_captions(paths: &AppPaths) -> Result<Vec<CaptionRecord>> {
 }
 
 pub(crate) fn latest_captions_by_path(paths: &AppPaths) -> Result<HashMap<PathBuf, CaptionRecord>> {
+    let images = latest_images_by_path(paths)?;
+    Ok(all_latest_captions_by_path(paths)?
+        .into_iter()
+        .filter(|(path, caption)| {
+            images.get(path).is_some_and(|image| {
+                caption.image_id == image.id
+                    && caption
+                        .source_sha256
+                        .as_deref()
+                        .is_none_or(|sha256| sha256 == image.sha256)
+            })
+        })
+        .collect())
+}
+
+pub(crate) fn all_latest_captions_by_path(
+    paths: &AppPaths,
+) -> Result<HashMap<PathBuf, CaptionRecord>> {
     let mut captions = HashMap::new();
     for caption in read_jsonl::<CaptionRecord>(&paths.captions)? {
         captions.insert(caption.path.clone(), caption);
@@ -253,32 +252,85 @@ pub(crate) fn latest_captions_by_path(paths: &AppPaths) -> Result<HashMap<PathBu
 }
 
 pub(crate) fn build_image_record(path: &Path) -> Result<ImageRecord> {
+    match refresh_image_record(path, None)? {
+        ImageRefresh::New(record) => Ok(record),
+        ImageRefresh::Unchanged
+        | ImageRefresh::MetadataOnly(_)
+        | ImageRefresh::ContentChanged(_) => Err(anyhow!(
+            "new image unexpectedly resolved as an existing record"
+        )),
+    }
+}
+
+pub(crate) fn refresh_image_record(
+    path: &Path,
+    previous: Option<&ImageRecord>,
+) -> Result<ImageRefresh> {
     let metadata =
         fs::metadata(path).with_context(|| format!("metadata failed for {}", path.display()))?;
     let modified_at = metadata.modified().ok().map(DateTime::<Utc>::from);
+    if previous.is_some_and(|image| {
+        image.size == metadata.len() && image.modified_at == modified_at && image.active
+    }) {
+        return Ok(ImageRefresh::Unchanged);
+    }
+    let sha256 = sha256_file(path)?;
     let extension = path
         .extension()
         .and_then(OsStr::to_str)
         .unwrap_or_default()
         .to_lowercase();
-    Ok(ImageRecord {
-        id: Uuid::new_v4().to_string(),
+    let Some(previous) = previous else {
+        return Ok(ImageRefresh::New(ImageRecord {
+            id: Uuid::new_v4().to_string(),
+            path: path.to_path_buf(),
+            original_path: path.to_path_buf(),
+            sha256,
+            size: metadata.len(),
+            modified_at,
+            discovered_at: Utc::now(),
+            extension,
+            active: true,
+            removed_at: None,
+        }));
+    };
+    let content_changed = previous.sha256 != sha256;
+    let record = ImageRecord {
+        id: previous.id.clone(),
         path: path.to_path_buf(),
-        original_path: path.to_path_buf(),
-        sha256: sha256_file(path)?,
+        original_path: previous.original_path.clone(),
+        sha256,
         size: metadata.len(),
         modified_at,
-        discovered_at: Utc::now(),
+        discovered_at: previous.discovered_at,
         extension,
         active: true,
         removed_at: None,
-    })
+    };
+    if content_changed {
+        Ok(ImageRefresh::ContentChanged(record))
+    } else {
+        Ok(ImageRefresh::MetadataOnly(record))
+    }
 }
 
 fn sha256_file(path: &Path) -> Result<String> {
-    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let digest = Sha256::digest(bytes);
-    Ok(format!("{digest:x}"))
+    let file = File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
+    sha256_reader(BufReader::new(file))
+        .with_context(|| format!("failed to read {}", path.display()))
+}
+
+fn sha256_reader(mut reader: impl Read) -> Result<String> {
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 pub(crate) fn is_image_path(path: &Path) -> bool {
@@ -286,4 +338,42 @@ pub(crate) fn is_image_path(path: &Path) -> bool {
         .and_then(OsStr::to_str)
         .map(|ext| IMAGE_EXTENSIONS.contains(&ext.to_lowercase().as_str()))
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Cursor, Read};
+
+    struct BoundedRead<R> {
+        inner: R,
+        max_buffer: usize,
+    }
+
+    impl<R: Read> Read for BoundedRead<R> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            assert!(
+                buffer.len() <= self.max_buffer,
+                "hashing requested a {} byte buffer",
+                buffer.len()
+            );
+            self.inner.read(buffer)
+        }
+    }
+
+    #[test]
+    fn sha256_reader_hashes_input_in_bounded_chunks() {
+        // Given: input larger than the maximum read buffer accepted by the source.
+        let bytes = vec![0x5a; 32 * 1024];
+        let reader = BoundedRead {
+            inner: Cursor::new(&bytes),
+            max_buffer: 8 * 1024,
+        };
+
+        // When: the streaming hash helper consumes it.
+        let digest = sha256_reader(reader).expect("streaming hash");
+
+        // Then: the digest is complete without requesting a whole-file buffer.
+        assert_eq!(digest, format!("{:x}", Sha256::digest(&bytes)));
+    }
 }

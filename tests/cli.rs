@@ -2,7 +2,11 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     process::{Command, Output},
+    time::{Duration, SystemTime},
 };
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_clawgallery"))
@@ -71,6 +75,144 @@ fn folder_bootstrap_search_and_remove_flow() {
     ));
     let listed_after = assert_success(run(&config, &["folder", "list"]));
     assert!(listed_after.trim().is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn bootstrap_unchanged_metadata_does_not_read_image_again() {
+    // Given: an indexed image whose bytes can no longer be opened.
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    let image = temp.path().join("screen.png");
+    fs::write(&image, b"unchanged image bytes").unwrap();
+    assert_success(run(&config, &["init"]));
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", image.to_str().unwrap()],
+    ));
+    let images_before = fs::read(config.join("images.jsonl")).unwrap();
+    fs::set_permissions(&image, fs::Permissions::from_mode(0o000)).unwrap();
+
+    // When: bootstrap sees the same size and modified time.
+    let output = run(&config, &["bootstrap", "--path", image.to_str().unwrap()]);
+    fs::set_permissions(&image, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_success(output);
+
+    // Then: it neither reads the image nor appends an error or image record.
+    assert_eq!(
+        fs::read(config.join("images.jsonl")).unwrap(),
+        images_before
+    );
+    assert_eq!(fs::read_to_string(config.join("errors.jsonl")).unwrap(), "");
+}
+
+#[test]
+fn bootstrap_metadata_only_change_preserves_image_id() {
+    // Given: one indexed image and its original fingerprint.
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    let image = temp.path().join("screen.png");
+    fs::write(&image, b"same image bytes").unwrap();
+    assert_success(run(&config, &["init"]));
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", image.to_str().unwrap()],
+    ));
+    let before = read_jsonl(&config.join("images.jsonl"));
+    let original_id = before[0]["id"].as_str().unwrap().to_string();
+    let original_sha = before[0]["sha256"].as_str().unwrap().to_string();
+    let file = fs::OpenOptions::new().write(true).open(&image).unwrap();
+    file.set_times(fs::FileTimes::new().set_modified(SystemTime::now() + Duration::from_secs(5)))
+        .unwrap();
+
+    // When: bootstrap observes only the modified time change.
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", image.to_str().unwrap()],
+    ));
+
+    // Then: append-only metadata advances while content identity stays stable.
+    let after = read_jsonl(&config.join("images.jsonl"));
+    assert_eq!(after.len(), 2);
+    assert_eq!(after[1]["id"], original_id);
+    assert_eq!(after[1]["sha256"], original_sha);
+    assert_ne!(after[1]["modified_at"], before[0]["modified_at"]);
+}
+
+#[test]
+fn bootstrap_content_change_preserves_id_and_marks_caption_stale() {
+    // Given: an indexed image with a caption for its original bytes.
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    let image = temp.path().join("screen.png");
+    fs::write(&image, b"old image bytes").unwrap();
+    assert_success(run(&config, &["init"]));
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", image.to_str().unwrap()],
+    ));
+    let before = read_jsonl(&config.join("images.jsonl"));
+    let original_id = before[0]["id"].as_str().unwrap().to_string();
+    let caption = serde_json::json!({
+        "image_id": original_id,
+        "path": image.canonicalize().unwrap(),
+        "title": "Old Caption",
+        "description": "Only valid for the old bytes",
+        "model": "test",
+        "provider": "test",
+        "created_at": "2026-05-03T00:00:00Z",
+        "filename_meaningful": false
+    });
+    fs::write(config.join("captions.jsonl"), format!("{caption}\n")).unwrap();
+
+    // When: the same path is overwritten and bootstrap refreshes the index.
+    fs::write(&image, b"new image bytes with a different length").unwrap();
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", image.to_str().unwrap()],
+    ));
+
+    // Then: identity is stable, the old caption is excluded, and --missing selects the image.
+    let after = read_jsonl(&config.join("images.jsonl"));
+    assert_eq!(after.last().unwrap()["id"], original_id);
+    assert_ne!(after.last().unwrap()["sha256"], before[0]["sha256"]);
+    let search = assert_success(run(&config, &["search", "Old Caption"]));
+    assert!(search.trim().is_empty(), "stale caption leaked: {search}");
+    let missing = assert_success(run(&config, &["caption", "--missing", "--dry-run"]));
+    assert!(missing.contains("would caption"), "got: {missing}");
+}
+
+#[test]
+fn legacy_caption_for_replaced_image_id_is_not_current() {
+    // Given: state produced by the old behavior, where an overwrite replaced the image id.
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    let image = temp.path().join("screen.png");
+    fs::write(&image, b"current image bytes").unwrap();
+    assert_success(run(&config, &["init"]));
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", image.to_str().unwrap()],
+    ));
+    let caption = serde_json::json!({
+        "image_id": "superseded-image-id",
+        "path": image.canonicalize().unwrap(),
+        "title": "Superseded Caption",
+        "description": "Caption belongs to the replaced id",
+        "model": "legacy",
+        "provider": "test",
+        "created_at": "2026-05-03T00:00:00Z",
+        "filename_meaningful": false
+    });
+    fs::write(config.join("captions.jsonl"), format!("{caption}\n")).unwrap();
+
+    // When: current caption consumers read the legacy state.
+    let search = assert_success(run(&config, &["search", "Superseded Caption"]));
+    let missing = assert_success(run(&config, &["caption", "--missing", "--dry-run"]));
+
+    // Then: the replaced id cannot make the current image look captioned.
+    assert!(search.trim().is_empty(), "stale caption leaked: {search}");
+    assert!(missing.contains("would caption"), "got: {missing}");
 }
 
 #[test]

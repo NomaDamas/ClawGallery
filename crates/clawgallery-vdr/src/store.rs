@@ -131,6 +131,19 @@ pub(super) fn prune_inactive_vectors(
     Ok(())
 }
 
+pub(super) fn deactivate_stale_vectors(
+    conn: &Connection,
+    image_id: &str,
+    sha256: &str,
+) -> Result<()> {
+    conn.execute(
+        "update vdr_embeddings set active = 0
+         where image_id = ?1 and sha256 <> ?2 and active = 1",
+        params![image_id, sha256],
+    )?;
+    Ok(())
+}
+
 pub(super) fn insert_vector(
     conn: &Connection,
     item: &PendingEmbedding,
