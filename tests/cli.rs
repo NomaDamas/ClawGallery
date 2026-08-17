@@ -251,6 +251,65 @@ fn sha_matched_caption_created_before_bootstrap_remains_current() {
     assert!(search.contains("screen.png"), "caption was lost: {search}");
     assert!(rename.contains("dry-run"), "caption was lost: {rename}");
     assert_eq!(missing, "no images need captions\n");
+    let images = read_jsonl(&config.join("images.jsonl"));
+    let persisted_id = images[0]["id"].as_str().unwrap();
+    let last_caption = read_jsonl(&config.join("captions.jsonl"))
+        .pop()
+        .expect("normalized caption");
+    assert_eq!(last_caption["image_id"], persisted_id);
+}
+
+#[test]
+fn caption_file_refreshes_indexed_image_before_binding_sha() {
+    // Given: an indexed image whose bytes later change without a bootstrap.
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    let image = temp.path().join("screen.png");
+    let new_bytes = b"captioned after overwrite without bootstrap";
+    fs::write(&image, b"original indexed bytes").unwrap();
+    assert_success(run(&config, &["init"]));
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", image.to_str().unwrap()],
+    ));
+    let before = read_jsonl(&config.join("images.jsonl"));
+    let original_id = before[0]["id"].as_str().unwrap().to_string();
+    let original_sha = before[0]["sha256"].as_str().unwrap().to_string();
+    fs::write(&image, new_bytes).unwrap();
+
+    // When: caption --file inspects the overwritten path before credentials fail.
+    let output = run(&config, &["caption", "--file", image.to_str().unwrap()]);
+    assert!(!output.status.success());
+
+    // Then: the persisted fingerprint matches the bytes that would be captioned.
+    let after = read_jsonl(&config.join("images.jsonl"));
+    let refreshed = after.last().unwrap();
+    assert_eq!(refreshed["id"], original_id);
+    assert_ne!(refreshed["sha256"], original_sha);
+    assert_eq!(
+        refreshed["sha256"],
+        format!("{:x}", Sha256::digest(new_bytes))
+    );
+    let caption = serde_json::json!({
+        "image_id": original_id,
+        "path": image.canonicalize().unwrap(),
+        "source_sha256": refreshed["sha256"],
+        "title": "Live File Caption",
+        "description": "Bound to the overwritten bytes",
+        "model": "test",
+        "provider": "test",
+        "created_at": "2026-08-17T00:00:00Z",
+        "filename_meaningful": false
+    });
+    fs::write(config.join("captions.jsonl"), format!("{caption}\n")).unwrap();
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", image.to_str().unwrap()],
+    ));
+    let search = assert_success(run(&config, &["search", "Live File Caption"]));
+    let missing = assert_success(run(&config, &["caption", "--missing", "--dry-run"]));
+    assert!(search.contains("screen.png"), "caption was lost: {search}");
+    assert_eq!(missing, "no images need captions\n");
 }
 
 #[test]
