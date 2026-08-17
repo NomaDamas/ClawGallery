@@ -555,7 +555,7 @@ fn vdr_sync_updates_vector_path_after_image_record_path_changes() {
 
 #[test]
 fn vdr_sync_reindexes_when_file_sha_changes() {
-    // Given: an indexed image whose bytes change without changing its path.
+    // Given: a synced image whose bytes change without changing its path.
     let server = FakeEmbeddingServer::start();
     let temp = tempfile::tempdir().expect("tempdir");
     let config = temp.path().join("state");
@@ -576,21 +576,88 @@ fn vdr_sync_reindexes_when_file_sha_changes() {
         &["vdr", "sync", "--dimensions", "4"],
         server.url(),
     ));
+    let requests_after_first_sync = server.request_count();
 
     fs::write(&image, b"dog image bytes changed").expect("modify image bytes");
 
-    // When: VDR sync runs again without a path change.
+    // When: VDR sync runs before and after bootstrap refreshes filesystem state.
+    let before_bootstrap = assert_success(run(
+        &config,
+        &["vdr", "sync", "--dimensions", "4"],
+        server.url(),
+    ));
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", images.to_str().expect("utf8")],
+        server.url(),
+    ));
+    let (refreshed_id, _) = image_id_for(&config, "dog.png");
     let synced = assert_success(run(
         &config,
         &["vdr", "sync", "--dimensions", "4"],
         server.url(),
     ));
 
-    // Then: image and caption vectors are refreshed for the new file sha.
+    // Then: VDR consumes bootstrap state, preserves identity, and refreshes only current content.
     assert!(
-        synced.contains("indexed 2"),
-        "changed same-path image should be re-indexed, got: {synced}"
+        before_bootstrap.contains("indexed 0"),
+        "sync must not rescan files, got: {before_bootstrap}"
     );
+    assert_eq!(server.request_count(), requests_after_first_sync + 1);
+    assert_eq!(refreshed_id, dog_id);
+    assert!(
+        synced.contains("indexed 1"),
+        "only the changed image should be re-indexed until recaptioned, got: {synced}"
+    );
+}
+
+#[test]
+fn vdr_failed_reindex_preserves_last_good_vectors() {
+    // Given: a fully indexed image whose bytes are later refreshed by bootstrap.
+    let initial_server = FakeEmbeddingServer::start();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).expect("create images");
+    let image = images.join("dog.png");
+    fs::write(&image, b"dog image bytes").expect("write dog image");
+    assert_success(run(&config, &["init"], initial_server.url()));
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", images.to_str().expect("utf8")],
+        initial_server.url(),
+    ));
+    let (dog_id, dog_path) = image_id_for(&config, "dog.png");
+    write_caption(&config, &dog_id, &dog_path, "Dog", "puppy");
+    assert_success(run(
+        &config,
+        &["vdr", "sync", "--dimensions", "4"],
+        initial_server.url(),
+    ));
+    fs::write(&image, b"changed dog image bytes").expect("change dog image");
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", images.to_str().expect("utf8")],
+        initial_server.url(),
+    ));
+    let failing_server = FakeEmbeddingServer::start_with_statuses(vec![500]);
+
+    // When: replacement embedding fails before a new vector can be stored.
+    let failed = run(
+        &config,
+        &["vdr", "sync", "--dimensions", "4", "--max-retries", "0"],
+        failing_server.url(),
+    );
+
+    // Then: the last successful image and caption vectors remain active.
+    assert!(!failed.status.success(), "reindex should fail");
+    let status = assert_success(run(
+        &config,
+        &["vdr", "status", "--json"],
+        initial_server.url(),
+    ));
+    let status: serde_json::Value = serde_json::from_str(&status).expect("status json");
+    assert_eq!(status["active_vectors"], 2, "got: {status}");
 }
 
 #[test]

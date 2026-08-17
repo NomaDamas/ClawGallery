@@ -26,11 +26,12 @@ use walkdir::WalkDir;
 mod state;
 mod vdr;
 
+use state::ImageRefresh;
 pub(crate) use state::{
-    AppConfig, AppPaths, CaptionRecord, FolderRecord, ImageRecord, active_folders, append_jsonl,
-    build_image_record, is_image_path, latest_captions, latest_captions_by_path, latest_images,
-    latest_images_by_path, latest_images_refreshing_changed_files, read_config, read_jsonl,
-    write_json_pretty,
+    AppConfig, AppPaths, CaptionRecord, FolderRecord, ImageRecord, active_folders,
+    all_latest_captions_by_path, append_jsonl, build_image_record, is_image_path, latest_captions,
+    latest_captions_by_path, latest_images, latest_images_by_path, read_config, read_jsonl,
+    refresh_image_record, write_json_pretty,
 };
 
 const APP_DIR_NAME: &str = "clawgallery";
@@ -552,6 +553,7 @@ struct BootstrapStats {
 fn cmd_bootstrap(paths: &AppPaths, args: &IngestArgs) -> Result<BootstrapStats> {
     ensure_state_files(paths)?;
     let existing = latest_images_by_path(paths)?;
+    let captions = all_latest_captions_by_path(paths)?;
     let mut seen_paths: HashSet<PathBuf> = HashSet::new();
     let mut ingested = 0;
     for image_path in candidate_image_paths(paths, args)? {
@@ -560,12 +562,32 @@ fn cmd_bootstrap(paths: &AppPaths, args: &IngestArgs) -> Result<BootstrapStats> 
             continue;
         }
         seen_paths.insert(canonical.clone());
-        match build_image_record(&canonical) {
-            Ok(record) => {
-                if let Some(previous) = existing.get(&canonical)
-                    && previous.has_same_file_fingerprint(&record)
+        match refresh_image_record(&canonical, existing.get(&canonical)) {
+            Ok(ImageRefresh::Unchanged) => {}
+            Ok(ImageRefresh::MetadataOnly(record)) => {
+                append_jsonl(&paths.images, &record)?;
+                ingested += 1;
+            }
+            Ok(ImageRefresh::New(record)) => {
+                if let Some(caption) = captions.get(&canonical)
+                    && caption.source_sha256.as_deref() == Some(record.sha256.as_str())
+                    && caption.image_id != record.id
                 {
-                    continue;
+                    let mut normalized = caption.clone();
+                    normalized.image_id.clone_from(&record.id);
+                    append_jsonl(&paths.captions, &normalized)?;
+                }
+                append_jsonl(&paths.images, &record)?;
+                ingested += 1;
+            }
+            Ok(ImageRefresh::ContentChanged(record)) => {
+                if let Some(caption) = captions.get(&canonical)
+                    && caption.source_sha256.is_none()
+                    && let Some(previous) = existing.get(&canonical)
+                {
+                    let mut fingerprinted = caption.clone();
+                    fingerprinted.source_sha256 = Some(previous.sha256.clone());
+                    append_jsonl(&paths.captions, &fingerprinted)?;
                 }
                 append_jsonl(&paths.images, &record)?;
                 ingested += 1;
@@ -688,10 +710,19 @@ fn cmd_caption(paths: &AppPaths, args: CaptionArgs) -> Result<()> {
     let mut images = latest_images(paths)?;
     if let Some(file) = args.file {
         let canonical = fs::canonicalize(&file).unwrap_or(file);
-        if !images.iter().any(|image| image.path == canonical) {
-            images.push(build_image_record(&canonical)?);
-        }
-        images.retain(|image| image.path == canonical);
+        let previous = images.iter().find(|image| image.path == canonical).cloned();
+        let record = match refresh_image_record(&canonical, previous.as_ref())? {
+            ImageRefresh::Unchanged => previous
+                .ok_or_else(|| anyhow!("unchanged image refresh requires an existing record"))?,
+            ImageRefresh::MetadataOnly(record) | ImageRefresh::ContentChanged(record) => {
+                if !args.dry_run {
+                    append_jsonl(&paths.images, &record)?;
+                }
+                record
+            }
+            ImageRefresh::New(record) => record,
+        };
+        images = vec![record];
     }
     if args.missing {
         let captioned: HashSet<String> = latest_captions(paths)?
@@ -722,6 +753,7 @@ fn cmd_caption(paths: &AppPaths, args: CaptionArgs) -> Result<()> {
                 let record = CaptionRecord {
                     image_id: result.image.id.clone(),
                     path: result.image.path.clone(),
+                    source_sha256: Some(result.image.sha256.clone()),
                     title: output.title,
                     description: output.description,
                     model: effective_model.clone(),
