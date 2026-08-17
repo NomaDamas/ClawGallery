@@ -245,10 +245,12 @@ fn sha_matched_caption_created_before_bootstrap_remains_current() {
     ));
     let search = assert_success(run(&config, &["search", "Pre Bootstrap Caption"]));
     let rename = assert_success(run(&config, &["rename", "--dry-run"]));
+    let missing = assert_success(run(&config, &["caption", "--missing", "--dry-run"]));
 
-    // Then: the SHA-bound caption remains usable despite its transient image id.
+    // Then: the SHA-bound caption remains usable and is not selected for a paid rerun.
     assert!(search.contains("screen.png"), "caption was lost: {search}");
     assert!(rename.contains("dry-run"), "caption was lost: {rename}");
+    assert_eq!(missing, "no images need captions\n");
 }
 
 #[test]

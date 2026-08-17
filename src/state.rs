@@ -229,13 +229,17 @@ pub(crate) fn latest_captions_by_path(paths: &AppPaths) -> Result<HashMap<PathBu
     let images = latest_images_by_path(paths)?;
     Ok(all_latest_captions_by_path(paths)?
         .into_iter()
-        .filter(|(path, caption)| {
-            images.get(path).is_some_and(|image| {
-                caption.source_sha256.as_deref().map_or_else(
-                    || caption.image_id == image.id,
-                    |sha256| sha256 == image.sha256,
-                )
-            })
+        .filter_map(|(path, mut caption)| {
+            let image = images.get(&path)?;
+            let is_current = caption.source_sha256.as_deref().map_or_else(
+                || caption.image_id == image.id,
+                |sha256| sha256 == image.sha256,
+            );
+            if !is_current {
+                return None;
+            }
+            caption.image_id.clone_from(&image.id);
+            Some((path, caption))
         })
         .collect())
 }
