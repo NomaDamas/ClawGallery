@@ -20,6 +20,12 @@ pub(super) struct EmbedResponse {
     pub(super) embeddings: Vec<Vec<Vec<f32>>>,
 }
 
+#[derive(Debug)]
+pub(super) struct SparseEmbedResponse {
+    pub(super) model: String,
+    pub(super) embeddings: Vec<crate::sparse::SparseVector>,
+}
+
 #[derive(Debug, Deserialize)]
 struct RawEmbedResponse {
     model: String,
@@ -31,6 +37,8 @@ struct RawEmbedResponse {
 struct EmbedRequest {
     model: String,
     dimensions: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    format: Option<&'static str>,
     inputs: Vec<EmbedInput>,
 }
 
@@ -61,6 +69,7 @@ pub(super) fn embed_with_retries(
     let request = EmbedRequest {
         model: model.to_string(),
         dimensions,
+        format: None,
         inputs,
     };
     let client = reqwest::blocking::Client::new();
@@ -235,6 +244,57 @@ fn redact_message(message: &str) -> String {
         .map(redact_url)
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+pub(super) fn embed_sparse(
+    url: &str,
+    model: &str,
+    dimensions: usize,
+    inputs: Vec<EmbedInput>,
+    max_retries: usize,
+) -> Result<SparseEmbedResponse> {
+    let endpoint = format!("{}/embed", url.trim_end_matches('/'));
+    let request = EmbedRequest {
+        model: model.to_string(),
+        dimensions,
+        format: Some("sparse"),
+        inputs,
+    };
+    let client = reqwest::blocking::Client::new();
+    let response = send_with_retry(&client, &endpoint, &request, max_retries).map_err(|err| {
+        anyhow!(
+            "{} at {}: {}",
+            err.context,
+            redact_url(url),
+            redact_message(&err.message)
+        )
+    })?;
+    let response: Value = response.json()?;
+    let raw: RawEmbedResponse = serde_json::from_value(response)?;
+    if raw.model != model {
+        bail!(
+            "embedding server returned model {} but {} was requested; pass --model/--dimensions matching the running server",
+            raw.model,
+            model
+        );
+    }
+    if let Some(response_dimensions) = raw.dimensions
+        && response_dimensions != dimensions
+    {
+        bail!(
+            "embedding server returned dimensions {} but {} was requested; pass --model/--dimensions matching the running server",
+            response_dimensions,
+            dimensions
+        );
+    }
+    let mut embeddings = Vec::with_capacity(raw.embeddings.len());
+    for value in raw.embeddings {
+        embeddings.push(crate::sparse::parse_sparse_vector(&value)?);
+    }
+    Ok(SparseEmbedResponse {
+        model: raw.model,
+        embeddings,
+    })
 }
 
 pub(super) fn query_input(query: &str) -> EmbedInput {

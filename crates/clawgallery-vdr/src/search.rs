@@ -3,9 +3,9 @@ use anyhow::{Result, bail};
 use std::{collections::HashMap, path::PathBuf};
 
 use super::{
-    client::{default_model, embed, query_input, resolve_embedding_url},
-    index::{ActiveIndexConfig, latest_active_index_config},
-    store::{active_vectors, open_store},
+    client::{default_model, embed, embed_sparse, query_input, resolve_embedding_url},
+    index::{ActiveIndexConfig, latest_active_index_config, latest_sparse_index_config},
+    store::{active_sparse_vectors, active_vectors, open_store},
 };
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -127,6 +127,93 @@ pub fn late_interaction_score(query: &[Vec<f32>], document: &[Vec<f32>]) -> Resu
         total += best;
     }
     Ok(total / query.len() as f64)
+}
+
+pub(super) fn lexical_search(
+    config: &SearchConfig,
+    query: &str,
+    images: Vec<ImageDocument>,
+    captions: Vec<CaptionDocument>,
+) -> Result<Vec<EmbeddingSearchHit>> {
+    let conn = open_store(&config.db_path)?;
+    let url = resolve_embedding_url(config.embedding_url.as_deref());
+    let index_config = match (config.model.clone(), config.dimensions) {
+        (Some(model), Some(dimensions)) => ActiveIndexConfig { model, dimensions },
+        _ => latest_sparse_index_config(&conn)?.unwrap_or_else(default_sparse_index_config),
+    };
+    let active_images: HashMap<String, ImageDocument> = images
+        .into_iter()
+        .map(|image| (image.id.clone(), image))
+        .collect();
+    let stored = active_sparse_vectors(
+        &conn,
+        &active_images,
+        &index_config.model,
+        index_config.dimensions,
+    )?;
+    if stored.is_empty() {
+        return Ok(Vec::new());
+    }
+    let response = embed_sparse(
+        &url,
+        &index_config.model,
+        index_config.dimensions,
+        vec![query_input(query)],
+        crate::DEFAULT_MAX_RETRIES,
+    )?;
+    let query_vector = response
+        .embeddings
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("embedding server returned no query embedding"))?;
+    let captions: HashMap<PathBuf, CaptionDocument> = captions
+        .into_iter()
+        .map(|caption| (caption.path.clone(), caption))
+        .collect();
+    let mut best_by_image = HashMap::new();
+    for stored in stored {
+        let Some(image) = active_images.get(&stored.image_id) else {
+            continue;
+        };
+        let score = query_vector.dot(&stored.vector);
+        let caption = captions.get(&image.path);
+        let hit = EmbeddingSearchHit {
+            path: image.path.clone(),
+            title: caption
+                .map(|c| c.title.clone())
+                .unwrap_or_else(|| "<missing>".to_string()),
+            description: caption
+                .map(|c| c.description.clone())
+                .unwrap_or_else(|| "<missing>".to_string()),
+            score,
+            matched_field: "lexical_image",
+            matched_atoms: vec![query.to_string()],
+            source: "lexical",
+        };
+        best_by_image
+            .entry(stored.image_id)
+            .and_modify(|existing: &mut EmbeddingSearchHit| {
+                if hit.score > existing.score {
+                    *existing = hit.clone();
+                }
+            })
+            .or_insert(hit);
+    }
+    let mut hits: Vec<_> = best_by_image.into_values().collect();
+    hits.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    hits.truncate(config.limit);
+    Ok(hits)
+}
+
+fn default_sparse_index_config() -> ActiveIndexConfig {
+    ActiveIndexConfig {
+        model: crate::DEFAULT_VSPLADE_MODEL.to_string(),
+        dimensions: crate::DEFAULT_VSPLADE_DIMENSIONS,
+    }
 }
 
 fn cosine_similarity(left: &[f32], right: &[f32]) -> Result<f64> {

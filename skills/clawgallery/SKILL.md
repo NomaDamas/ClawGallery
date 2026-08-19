@@ -71,7 +71,19 @@ clawgallery search "'github" "actions" --json
 clawgallery search "!error" "^login"
 ```
 
-Search atoms follow fzf-like rules for the keyword side: whitespace means AND, `'foo` exact substring, `^foo` prefix, `foo$` suffix, `!foo` exclusion, and `\ ` literal space. When a VDR index exists, default search also runs embedding search and fuses both rankings. Add `--mode keyword` for caption/path keyword search only, `--mode embedding` for VDR only, or `--no-fuzzy` for old exact-substring behavior.
+Search atoms follow fzf-like rules for the keyword side: whitespace means AND, `'foo` exact substring, `^foo` prefix, `foo$` suffix, `!foo` exclusion, and `\ ` literal space. When a VDR or V-SPLADE index exists, default search fuses those rankings with keyword search via Reciprocal Rank Fusion. Add `--mode keyword` for caption/path keyword search only, `--mode lexical` for V-SPLADE sparse retrieval, `--mode embedding` for dense VDR only, or `--no-fuzzy` for old exact-substring behavior.
+
+## V-SPLADE lexical search
+
+Use the MLX V-SPLADE runtime from [SPLADE-mlx](https://github.com/NomaDamas/SPLADE-mlx) for sparse visual-lexical retrieval. Point `CLAWGALLERY_PYTHON` at an environment with `splade-mlx`, `mlx`, `transformers`, `numpy`, and `pillow`:
+
+```bash
+CLAWGALLERY_PYTHON=/path/to/splade-mlx/.venv/bin/python \
+  clawgallery vdr sync --backend vsplade
+clawgallery search --mode lexical "invoice total" --json
+```
+
+Default model `NomaDamas/v-splade-efficient-mlx`, dimensions `50368`. The index stores sparse `{indices,values}` postings and can coexist with a dense VDR index. Hybrid search fuses keyword + lexical + embedding ranks with RRF (`k=60`).
 
 ## VDR model setup
 

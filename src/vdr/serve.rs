@@ -12,6 +12,7 @@ use std::{
 
 const MLX_SERVER: &str = include_str!("../../scripts/mlx_embeddings_server.py");
 const JINA_MLX_SERVER: &str = include_str!("../../scripts/jina_mlx_embeddings_server.py");
+const VSPLADE_SERVER: &str = include_str!("../../scripts/vsplade_server.py");
 const MANAGED_STARTUP_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
 impl ServeBackend {
@@ -19,6 +20,7 @@ impl ServeBackend {
         match self {
             Self::Mlx => "mlx",
             Self::JinaMlx => "jina-mlx",
+            Self::Vsplade => "vsplade",
         }
     }
 
@@ -26,6 +28,7 @@ impl ServeBackend {
         match self {
             Self::Mlx => MLX_SERVER,
             Self::JinaMlx => JINA_MLX_SERVER,
+            Self::Vsplade => VSPLADE_SERVER,
         }
     }
 }

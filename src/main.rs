@@ -325,6 +325,7 @@ enum SearchMode {
     Hybrid,
     Keyword,
     Embedding,
+    Lexical,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1595,6 +1596,7 @@ enum HitSource {
     Levenshtein,
     NoFuzzy,
     Embedding,
+    Lexical,
     Hybrid,
 }
 
@@ -1979,6 +1981,11 @@ fn search_result_from_keyword_hit(hit: &SearchHit, candidate: &SearchCandidate) 
 }
 
 fn search_result_from_embedding_hit(hit: clawgallery_vdr::EmbeddingSearchHit) -> SearchResult {
+    let source = if hit.source == "lexical" {
+        HitSource::Lexical
+    } else {
+        HitSource::Embedding
+    };
     SearchResult {
         path_raw: hit.path,
         title: hit.title,
@@ -1987,7 +1994,7 @@ fn search_result_from_embedding_hit(hit: clawgallery_vdr::EmbeddingSearchHit) ->
         pattern_score: 0,
         matched_field: hit.matched_field.to_string(),
         matched_atoms: hit.matched_atoms,
-        source: HitSource::Embedding,
+        source,
         discovered_at: Utc::now(),
     }
 }
@@ -2067,38 +2074,53 @@ fn rrf_score(rank: usize) -> f64 {
 
 fn merge_hybrid_results(
     keyword_hits: &[SearchHit],
-    embedding_hits: Vec<clawgallery_vdr::EmbeddingSearchHit>,
+    ranked_lists: Vec<Vec<clawgallery_vdr::EmbeddingSearchHit>>,
     candidates: &[SearchCandidate],
     limit: usize,
 ) -> Vec<SearchResult> {
+    let mut lists = vec![
+        keyword_hits
+            .iter()
+            .map(|hit| search_result_from_keyword_hit(hit, &candidates[hit.candidate_idx]))
+            .collect::<Vec<_>>(),
+    ];
+    lists.extend(ranked_lists.into_iter().map(|hits| {
+        hits.into_iter()
+            .map(search_result_from_embedding_hit)
+            .collect()
+    }));
+    fuse_rrf_results(lists, limit)
+}
+
+fn fuse_rrf_results(lists: Vec<Vec<SearchResult>>, limit: usize) -> Vec<SearchResult> {
     let mut by_path: HashMap<PathBuf, SearchResult> = HashMap::new();
-    for (rank, hit) in keyword_hits.iter().enumerate() {
-        let candidate = &candidates[hit.candidate_idx];
-        let mut result = search_result_from_keyword_hit(hit, candidate);
-        result.score = rrf_score(rank);
-        by_path.insert(result.path_raw.clone(), result);
-    }
-    for (rank, hit) in embedding_hits.into_iter().enumerate() {
-        let contribution = rrf_score(rank);
-        let path = hit.path.clone();
-        match by_path.get_mut(&path) {
-            Some(existing) => {
-                existing.score += contribution;
-                existing.source = HitSource::Hybrid;
-                if !existing.matched_field.contains(hit.matched_field) {
-                    existing.matched_field =
-                        format!("{},{}", existing.matched_field, hit.matched_field);
-                }
-                for atom in hit.matched_atoms {
-                    if !existing.matched_atoms.contains(&atom) {
-                        existing.matched_atoms.push(atom);
+    for list in lists {
+        for (rank, hit) in list.into_iter().enumerate() {
+            let contribution = rrf_score(rank);
+            let path = hit.path_raw.clone();
+            match by_path.get_mut(&path) {
+                Some(existing) => {
+                    existing.score += contribution;
+                    if existing.source != hit.source {
+                        existing.source = HitSource::Hybrid;
+                    }
+                    if !hit.matched_field.is_empty()
+                        && !existing.matched_field.contains(&hit.matched_field)
+                    {
+                        existing.matched_field =
+                            format!("{},{}", existing.matched_field, hit.matched_field);
+                    }
+                    for atom in hit.matched_atoms {
+                        if !existing.matched_atoms.contains(&atom) {
+                            existing.matched_atoms.push(atom);
+                        }
                     }
                 }
-            }
-            None => {
-                let mut result = search_result_from_embedding_hit(hit);
-                result.score = contribution;
-                by_path.insert(path, result);
+                None => {
+                    let mut result = hit;
+                    result.score = contribution;
+                    by_path.insert(path, result);
+                }
             }
         }
     }
@@ -2124,17 +2146,29 @@ fn cmd_search(paths: &AppPaths, args: SearchArgs) -> Result<()> {
     let query = nfc(&args.keywords.join(" "));
     let captions = latest_captions_by_path(paths)?;
     let images = latest_images(paths)?;
-    if matches!(args.mode, SearchMode::Embedding) {
-        let embedding_hits = vdr::embedding_search_hits(
-            paths,
-            &query,
-            args.limit,
-            args.embedding_url.as_deref(),
-            false,
-            images,
-            captions,
-        )?;
-        for hit in embedding_hits {
+    if matches!(args.mode, SearchMode::Embedding | SearchMode::Lexical) {
+        let hits = if matches!(args.mode, SearchMode::Lexical) {
+            vdr::lexical_search_hits(
+                paths,
+                &query,
+                args.limit,
+                args.embedding_url.as_deref(),
+                false,
+                images,
+                captions,
+            )?
+        } else {
+            vdr::embedding_search_hits(
+                paths,
+                &query,
+                args.limit,
+                args.embedding_url.as_deref(),
+                false,
+                images,
+                captions,
+            )?
+        };
+        for hit in hits {
             let result = search_result_from_embedding_hit(hit);
             if args.json {
                 print_json_search_result(&result)?;
@@ -2198,9 +2232,18 @@ fn cmd_search(paths: &AppPaths, args: SearchArgs) -> Result<()> {
             latest_images(paths)?,
             latest_captions_by_path(paths)?,
         )?;
+        let lexical_hits = vdr::lexical_search_hits(
+            paths,
+            &query,
+            keyword_limit,
+            args.embedding_url.as_deref(),
+            true,
+            latest_images(paths)?,
+            latest_captions_by_path(paths)?,
+        )?;
         let results = merge_hybrid_results(
             &hits.iter().take(keyword_limit).cloned().collect::<Vec<_>>(),
-            embedding_hits,
+            vec![lexical_hits, embedding_hits],
             &candidates,
             args.limit,
         );

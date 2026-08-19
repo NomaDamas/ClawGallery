@@ -6,11 +6,14 @@ pub(super) const DEFAULT_MLX_DIMENSIONS: usize = 128;
 pub(super) const DEFAULT_MANAGED_HOST: &str = "127.0.0.1";
 const JINA_MLX_MODEL: &str = "jinaai/jina-embeddings-v5-omni-small-retrieval-mlx";
 const JINA_MLX_DIMENSIONS: usize = 1024;
+pub(super) const DEFAULT_VSPLADE_MODEL: &str = clawgallery_vdr::DEFAULT_VSPLADE_MODEL;
+pub(super) const DEFAULT_VSPLADE_DIMENSIONS: usize = clawgallery_vdr::DEFAULT_VSPLADE_DIMENSIONS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum ServeBackend {
     Mlx,
     JinaMlx,
+    Vsplade,
 }
 
 pub(super) struct BackendConfig {
@@ -27,6 +30,9 @@ pub(super) fn resolve_backend(
     let backend = backend.unwrap_or_else(|| {
         if model == Some(JINA_MLX_MODEL) {
             ServeBackend::JinaMlx
+        } else if model.is_some_and(|value| value.contains("v-splade") || value.contains("vsplade"))
+        {
+            ServeBackend::Vsplade
         } else {
             ServeBackend::Mlx
         }
@@ -34,6 +40,7 @@ pub(super) fn resolve_backend(
     let (default_model, default_dimensions) = match backend {
         ServeBackend::Mlx => (DEFAULT_MLX_MODEL, DEFAULT_MLX_DIMENSIONS),
         ServeBackend::JinaMlx => (JINA_MLX_MODEL, JINA_MLX_DIMENSIONS),
+        ServeBackend::Vsplade => (DEFAULT_VSPLADE_MODEL, DEFAULT_VSPLADE_DIMENSIONS),
     };
     let model = model.unwrap_or(default_model);
     let dimensions = dimensions.unwrap_or(default_dimensions);

@@ -1,11 +1,11 @@
 use crate::{AppPaths, CaptionRecord, ImageRecord};
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
 use clawgallery_vdr::{
     CaptionDocument, EmbeddingSearchHit, ImageDocument, SearchConfig, SyncConfig, SyncOutcome,
-    deactivate_image_vectors as deactivate_library_vectors, embedding_search,
-    pending_embedding_count, similar_image_groups as library_similar_image_groups,
-    status as library_status, sync,
+    VectorEncoding, deactivate_image_vectors as deactivate_library_vectors, embedding_search,
+    latest_dense_index_config, latest_sparse_index_config, lexical_search, pending_embedding_count,
+    similar_image_groups as library_similar_image_groups, status as library_status, sync,
 };
 use std::{collections::HashMap, env, path::PathBuf};
 
@@ -135,6 +135,7 @@ pub(crate) fn cmd_sync(paths: &AppPaths, args: VdrSyncArgs) -> Result<()> {
         embedding_url: args.embedding_url.clone(),
         max_retries: args.max_retries,
         prune: args.prune,
+        encoding: encoding_for(backend.backend),
     };
     let image_documents = image_documents(&images);
     let caption_documents = caption_documents_from_map(captions);
@@ -194,6 +195,13 @@ fn cmd_status(paths: &AppPaths, args: VdrStatusArgs) -> Result<()> {
     Ok(())
 }
 
+fn encoding_for(backend: ServeBackend) -> VectorEncoding {
+    match backend {
+        ServeBackend::Vsplade => VectorEncoding::Sparse,
+        ServeBackend::Mlx | ServeBackend::JinaMlx => VectorEncoding::Dense,
+    }
+}
+
 pub(crate) fn embedding_search_hits(
     paths: &AppPaths,
     query: &str,
@@ -203,14 +211,14 @@ pub(crate) fn embedding_search_hits(
     images: Vec<ImageRecord>,
     captions: HashMap<PathBuf, CaptionRecord>,
 ) -> Result<Vec<EmbeddingSearchHit>> {
-    let status = library_status(&paths.vdr_db, images.len())?;
-    if status.active_vectors == 0 && skip_empty_index {
+    let index = latest_dense_index_config(&paths.vdr_db)?;
+    if index.is_none() && skip_empty_index {
         return Ok(Vec::new());
     }
-    let model = status
-        .model
-        .unwrap_or_else(|| DEFAULT_MLX_MODEL.to_string());
-    let dimensions = status.dimensions.unwrap_or(DEFAULT_MLX_DIMENSIONS);
+    let (model, dimensions) = match index {
+        Some(index) => (index.model, index.dimensions),
+        None => (DEFAULT_MLX_MODEL.to_string(), DEFAULT_MLX_DIMENSIONS),
+    };
     let backend = resolve_backend(None, Some(&model), Some(dimensions))?;
     let env_embedding_url = env::var("CLAWGALLERY_VDR_EMBEDDING_URL").ok();
     let managed_server = if embedding_url.is_none() && env_embedding_url.is_none() {
@@ -240,6 +248,61 @@ pub(crate) fn embedding_search_hits(
             db_path: paths.vdr_db.clone(),
             model: Some(model),
             dimensions: Some(dimensions),
+            embedding_url,
+            limit,
+        },
+        query,
+        image_documents(&images),
+        caption_documents_from_map(captions),
+    )
+}
+
+pub(crate) fn lexical_search_hits(
+    paths: &AppPaths,
+    query: &str,
+    limit: usize,
+    embedding_url: Option<&str>,
+    skip_empty_index: bool,
+    images: Vec<ImageRecord>,
+    captions: HashMap<PathBuf, CaptionRecord>,
+) -> Result<Vec<EmbeddingSearchHit>> {
+    let index = latest_sparse_index_config(&paths.vdr_db)?;
+    if index.is_none() {
+        if skip_empty_index {
+            return Ok(Vec::new());
+        }
+        bail!("no V-SPLADE lexical index; run `clawgallery vdr sync --backend vsplade`");
+    }
+    let index = index.expect("sparse index checked");
+    let backend = resolve_backend(None, Some(&index.model), Some(index.dimensions))?;
+    let env_embedding_url = env::var("CLAWGALLERY_VDR_EMBEDDING_URL").ok();
+    let managed_server = if embedding_url.is_none() && env_embedding_url.is_none() {
+        Some(serve::ManagedServer::start_quiet(&serve::ServeArgs {
+            backend: backend.backend,
+            host: DEFAULT_MANAGED_HOST.to_string(),
+            port: 0,
+            model: index.model.clone(),
+            dimensions: index.dimensions,
+            device: "auto".to_string(),
+            python: None,
+            allow_remote: false,
+        })?)
+    } else {
+        None
+    };
+    let embedding_url = embedding_url
+        .map(str::to_string)
+        .or(env_embedding_url)
+        .or_else(|| {
+            managed_server
+                .as_ref()
+                .map(|server| server.url().to_string())
+        });
+    lexical_search(
+        &SearchConfig {
+            db_path: paths.vdr_db.clone(),
+            model: Some(index.model),
+            dimensions: Some(index.dimensions),
             embedding_url,
             limit,
         },

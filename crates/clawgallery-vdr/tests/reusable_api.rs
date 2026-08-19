@@ -1,5 +1,5 @@
 use clawgallery_vdr::{
-    CaptionDocument, DEFAULT_MAX_RETRIES, ImageDocument, SearchConfig, SyncConfig,
+    CaptionDocument, DEFAULT_MAX_RETRIES, ImageDocument, SearchConfig, SyncConfig, VectorEncoding,
     embedding_search, status, sync,
 };
 use std::{
@@ -36,6 +36,7 @@ fn reusable_vdr_api_indexes_and_searches_documents() {
             embedding_url: Some(server.url().to_string()),
             max_retries: DEFAULT_MAX_RETRIES,
             prune: true,
+            encoding: VectorEncoding::Dense,
         },
         images.clone(),
         captions.clone(),

@@ -19,8 +19,34 @@ pub struct VdrStatus {
 }
 
 pub(super) fn latest_active_index_config(conn: &Connection) -> Result<Option<ActiveIndexConfig>> {
-    Ok(conn
-        .query_row(
+    latest_index_config(conn, Some("dense"))
+}
+
+pub(super) fn latest_sparse_index_config(conn: &Connection) -> Result<Option<ActiveIndexConfig>> {
+    latest_index_config(conn, Some("sparse"))
+}
+
+pub(super) fn latest_any_index_config(conn: &Connection) -> Result<Option<ActiveIndexConfig>> {
+    latest_index_config(conn, None)
+}
+
+fn latest_index_config(
+    conn: &Connection,
+    encoding: Option<&str>,
+) -> Result<Option<ActiveIndexConfig>> {
+    let config = match encoding {
+        Some(encoding) => conn.query_row(
+            "select model, dimensions from vdr_embeddings
+             where active = 1 and encoding = ?1 order by indexed_at desc limit 1",
+            [encoding],
+            |row| {
+                Ok(ActiveIndexConfig {
+                    model: row.get(0)?,
+                    dimensions: row.get(1)?,
+                })
+            },
+        ),
+        None => conn.query_row(
             "select model, dimensions from vdr_embeddings
              where active = 1 order by indexed_at desc limit 1",
             [],
@@ -30,8 +56,9 @@ pub(super) fn latest_active_index_config(conn: &Connection) -> Result<Option<Act
                     dimensions: row.get(1)?,
                 })
             },
-        )
-        .optional()?)
+        ),
+    };
+    Ok(config.optional()?)
 }
 
 pub(super) fn status(db_path: &Path, active_images: usize, conn: &Connection) -> Result<VdrStatus> {
@@ -40,7 +67,7 @@ pub(super) fn status(db_path: &Path, active_images: usize, conn: &Connection) ->
         [],
         |row| row.get(0),
     )?;
-    let config = latest_active_index_config(conn)?;
+    let config = latest_any_index_config(conn)?;
     Ok(VdrStatus {
         active_images,
         active_vectors,

@@ -839,3 +839,214 @@ fn default_search_uses_hybrid_keyword_and_embedding_results() {
         "default search should include embedding result, got: {stdout}"
     );
 }
+
+#[test]
+fn lexical_search_ranks_vsplade_sparse_overlap() {
+    let server = FakeEmbeddingServer::start();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).expect("create images");
+    fs::write(images.join("dog.png"), b"dog image bytes").expect("write dog image");
+    fs::write(images.join("login.png"), b"login image bytes").expect("write login image");
+    assert_success(run(&config, &["init"], server.url()));
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", images.to_str().expect("utf8")],
+        server.url(),
+    ));
+    let (dog_id, dog_path) = image_id_for(&config, "dog.png");
+    let (login_id, login_path) = image_id_for(&config, "login.png");
+    write_caption(&config, &dog_id, &dog_path, "Animal Photo", "puppy playing");
+    write_caption(&config, &login_id, &login_path, "Settings", "password form");
+    let synced = assert_success(run(
+        &config,
+        &[
+            "vdr",
+            "sync",
+            "--backend",
+            "vsplade",
+            "--model",
+            "vsplade-test",
+            "--dimensions",
+            "8",
+        ],
+        server.url(),
+    ));
+    assert!(
+        synced.contains("indexed 2"),
+        "lexical sync should index images only, got: {synced}"
+    );
+
+    let stdout = assert_success(run(
+        &config,
+        &["search", "--mode", "lexical", "dog", "--json"],
+        server.url(),
+    ));
+    let rows: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("json result"))
+        .collect();
+    assert!(
+        !rows.is_empty(),
+        "lexical search should return hits, got: {stdout}"
+    );
+    assert!(
+        rows[0]["path"].as_str().expect("path").ends_with("dog.png"),
+        "dog query should rank dog.png first, got: {stdout}"
+    );
+    assert_eq!(rows[0]["source"], "lexical");
+    assert_eq!(rows[0]["matched_field"], "lexical_image");
+}
+
+#[test]
+fn dense_and_sparse_indexes_coexist_after_separate_syncs() {
+    let server = FakeEmbeddingServer::start();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).expect("create images");
+    fs::write(images.join("dog.png"), b"dog image bytes").expect("write dog image");
+    assert_success(run(&config, &["init"], server.url()));
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", images.to_str().expect("utf8")],
+        server.url(),
+    ));
+    let (dog_id, dog_path) = image_id_for(&config, "dog.png");
+    write_caption(&config, &dog_id, &dog_path, "Animal Photo", "puppy playing");
+
+    assert_success(run(
+        &config,
+        &["vdr", "sync", "--model", "dense-test", "--dimensions", "4"],
+        server.url(),
+    ));
+    assert_success(run(
+        &config,
+        &[
+            "vdr",
+            "sync",
+            "--backend",
+            "vsplade",
+            "--model",
+            "vsplade-test",
+            "--dimensions",
+            "8",
+        ],
+        server.url(),
+    ));
+
+    let status: serde_json::Value = serde_json::from_str(&assert_success(run(
+        &config,
+        &["vdr", "status", "--json"],
+        server.url(),
+    )))
+    .expect("status json");
+    assert_eq!(
+        status["active_vectors"], 3,
+        "dense image+caption plus sparse image must stay active, got: {status}"
+    );
+
+    let embedding = assert_success(run(
+        &config,
+        &["search", "--mode", "embedding", "dog", "--json"],
+        server.url(),
+    ));
+    let lexical = assert_success(run(
+        &config,
+        &["search", "--mode", "lexical", "dog", "--json"],
+        server.url(),
+    ));
+    let embedding_row: serde_json::Value =
+        serde_json::from_str(embedding.lines().next().expect("embedding hit")).unwrap();
+    let lexical_row: serde_json::Value =
+        serde_json::from_str(lexical.lines().next().expect("lexical hit")).unwrap();
+    assert_eq!(embedding_row["source"], "embedding");
+    assert_eq!(lexical_row["source"], "lexical");
+}
+
+#[test]
+fn hybrid_search_rrf_includes_lexical_hits() {
+    let server = FakeEmbeddingServer::start();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).expect("create images");
+    fs::write(images.join("login.png"), b"login image bytes").expect("write login image");
+    fs::write(images.join("dog.png"), b"dog image bytes").expect("write dog image");
+    assert_success(run(&config, &["init"], server.url()));
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", images.to_str().expect("utf8")],
+        server.url(),
+    ));
+    let (login_id, login_path) = image_id_for(&config, "login.png");
+    let (dog_id, dog_path) = image_id_for(&config, "dog.png");
+    write_caption(
+        &config,
+        &login_id,
+        &login_path,
+        "Login Dialog",
+        "settings screen",
+    );
+    write_caption(&config, &dog_id, &dog_path, "Animal Photo", "outside");
+    assert_success(run(
+        &config,
+        &[
+            "vdr",
+            "sync",
+            "--backend",
+            "vsplade",
+            "--model",
+            "vsplade-test",
+            "--dimensions",
+            "8",
+        ],
+        server.url(),
+    ));
+
+    let stdout = assert_success(run(
+        &config,
+        &["search", "dog", "--json", "--limit", "5"],
+        server.url(),
+    ));
+    let rows: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("json result"))
+        .collect();
+    assert!(
+        rows.iter().any(|row| {
+            row["path"].as_str().expect("path").ends_with("dog.png")
+                && (row["source"] == "lexical" || row["source"] == "hybrid")
+        }),
+        "hybrid RRF should surface the V-SPLADE dog hit, got: {stdout}"
+    );
+}
+
+#[test]
+fn lexical_search_without_index_explains_how_to_build_it() {
+    let server = FakeEmbeddingServer::start();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).expect("create images");
+    fs::write(images.join("dog.png"), b"dog image bytes").expect("write dog image");
+    assert_success(run(&config, &["init"], server.url()));
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", images.to_str().expect("utf8")],
+        server.url(),
+    ));
+
+    let output = run(
+        &config,
+        &["search", "--mode", "lexical", "dog", "--json"],
+        server.url(),
+    );
+    assert!(!output.status.success(), "missing lexical index must fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("vdr sync --backend vsplade"),
+        "got: {stderr}"
+    );
+}

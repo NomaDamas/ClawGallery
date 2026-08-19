@@ -14,6 +14,7 @@ pub(super) fn ensure_schema(conn: &Connection) -> Result<()> {
             dimensions integer not null,
             content_hash text not null default '',
             vector_json text not null,
+            encoding text not null default 'dense',
             active integer not null,
             indexed_at text not null
         );
@@ -24,7 +25,8 @@ pub(super) fn ensure_schema(conn: &Connection) -> Result<()> {
         create index if not exists vdr_embeddings_active
             on vdr_embeddings(active);",
     )?;
-    migrate_content_hash(conn)
+    migrate_content_hash(conn)?;
+    migrate_encoding(conn)
 }
 
 pub(super) fn content_hash(value: &str) -> String {
@@ -42,14 +44,29 @@ pub(super) fn parse_stored_vectors(vector_json: &str) -> Result<Vec<Vec<f32>>> {
     }
 }
 
-fn migrate_content_hash(conn: &Connection) -> Result<()> {
+fn table_columns(conn: &Connection) -> Result<Vec<String>> {
     let mut stmt = conn.prepare("pragma table_info(vdr_embeddings)")?;
-    let columns = stmt
+    Ok(stmt
         .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn migrate_content_hash(conn: &Connection) -> Result<()> {
+    let columns = table_columns(conn)?;
     if !columns.iter().any(|column| column == "content_hash") {
         conn.execute(
             "alter table vdr_embeddings add column content_hash text not null default ''",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+fn migrate_encoding(conn: &Connection) -> Result<()> {
+    let columns = table_columns(conn)?;
+    if !columns.iter().any(|column| column == "encoding") {
+        conn.execute(
+            "alter table vdr_embeddings add column encoding text not null default 'dense'",
             [],
         )?;
     }
