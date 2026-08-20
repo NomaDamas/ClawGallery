@@ -48,6 +48,19 @@ fn vdr_serve_help_lists_jina_mlx_backend() {
 }
 
 #[test]
+fn vdr_serve_help_lists_vsplade_backend() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let output = Command::new(clawgallery_bin())
+        .env("CLAWGALLERY_CONFIG_DIR", temp.path().join("state"))
+        .args(["vdr", "serve", "--help"])
+        .output()
+        .expect("clawgallery command should run");
+    assert!(output.status.success(), "serve help should succeed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("vsplade"), "got: {stdout}");
+}
+
+#[test]
 fn vdr_serve_jina_mlx_rejects_incompatible_dimensions() {
     // Given: the Jina MLX backend with a ColQwen-sized vector request.
     let temp = tempfile::tempdir().expect("tempdir");

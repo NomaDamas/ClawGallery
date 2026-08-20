@@ -194,18 +194,39 @@ fn handle_request(
     let inputs = request["inputs"].as_array().expect("inputs array");
     let model = request["model"].as_str().unwrap_or("test-model");
     let response_model = response_model.unwrap_or(model);
-    let response = if multivector {
-        let embeddings: Vec<_> = inputs.iter().map(multivector_for).collect();
+    let dimensions = request["dimensions"].as_u64().unwrap_or(4) as usize;
+    let sparse = request.get("format").and_then(|value| value.as_str()) == Some("sparse")
+        || model.contains("vsplade")
+        || model.contains("v-splade");
+    let response = if sparse {
+        let embeddings: Vec<_> = inputs
+            .iter()
+            .map(|input| sparse_for(input, dimensions))
+            .collect();
         serde_json::json!({
             "model": response_model,
-            "dimensions": 4,
+            "dimensions": dimensions,
+            "format": "sparse",
+            "embeddings": embeddings
+        })
+    } else if multivector {
+        let embeddings: Vec<_> = inputs
+            .iter()
+            .map(|input| multivector_for(input, dimensions))
+            .collect();
+        serde_json::json!({
+            "model": response_model,
+            "dimensions": dimensions,
             "embeddings": embeddings
         })
     } else {
-        let embeddings: Vec<_> = inputs.iter().map(embedding_for).collect();
+        let embeddings: Vec<_> = inputs
+            .iter()
+            .map(|input| embedding_for(input, dimensions))
+            .collect();
         serde_json::json!({
             "model": response_model,
-            "dimensions": 4,
+            "dimensions": dimensions,
             "embeddings": embeddings
         })
     };
@@ -218,9 +239,14 @@ fn handle_request(
     stream.write_all(reply.as_bytes()).expect("write response");
 }
 
-fn embedding_for(input: &serde_json::Value) -> Vec<f32> {
+fn pad_dims(mut row: Vec<f32>, dimensions: usize) -> Vec<f32> {
+    row.resize(dimensions.max(1), 0.0);
+    row
+}
+
+fn embedding_for(input: &serde_json::Value, dimensions: usize) -> Vec<f32> {
     let haystack = input["value"].as_str().unwrap_or_default().to_lowercase();
-    if haystack.contains("dog") || haystack.contains("puppy") {
+    let row = if haystack.contains("dog") || haystack.contains("puppy") {
         vec![1.0, 0.0, 0.0, 0.0]
     } else if haystack.contains("cat") || haystack.contains("kitten") {
         vec![0.0, 1.0, 0.0, 0.0]
@@ -228,18 +254,34 @@ fn embedding_for(input: &serde_json::Value) -> Vec<f32> {
         vec![0.0, 0.0, 1.0, 0.0]
     } else {
         vec![0.0, 0.0, 0.0, 1.0]
-    }
+    };
+    pad_dims(row, dimensions)
+}
+
+fn sparse_for(input: &serde_json::Value, dimensions: usize) -> serde_json::Value {
+    let haystack = input["value"].as_str().unwrap_or_default().to_lowercase();
+    let (index, value) = if haystack.contains("dog") || haystack.contains("puppy") {
+        (1_u32, 2.0_f32)
+    } else if haystack.contains("cat") || haystack.contains("kitten") {
+        (2, 2.0)
+    } else if haystack.contains("login") {
+        (3, 2.0)
+    } else {
+        (0, 0.1)
+    };
+    let index = index.min(dimensions.saturating_sub(1) as u32);
+    serde_json::json!({"indices": [index], "values": [value]})
 }
 
 /// Emits one token-level vector per word so MaxSim has multiple rows to
 /// reduce over, mimicking a late-interaction model.
-fn multivector_for(input: &serde_json::Value) -> Vec<Vec<f32>> {
+fn multivector_for(input: &serde_json::Value, dimensions: usize) -> Vec<Vec<f32>> {
     let haystack = input["value"].as_str().unwrap_or_default().to_lowercase();
     let mut rows: Vec<Vec<f32>> = haystack
         .split(|c: char| !c.is_ascii_alphanumeric())
         .filter(|word| !word.is_empty())
         .map(|word| {
-            if word.contains("dog") || word.contains("puppy") {
+            let row = if word.contains("dog") || word.contains("puppy") {
                 vec![1.0, 0.0, 0.0, 0.0]
             } else if word.contains("cat") || word.contains("kitten") {
                 vec![0.0, 1.0, 0.0, 0.0]
@@ -247,11 +289,12 @@ fn multivector_for(input: &serde_json::Value) -> Vec<Vec<f32>> {
                 vec![0.0, 0.0, 1.0, 0.0]
             } else {
                 vec![0.0, 0.0, 0.0, 1.0]
-            }
+            };
+            pad_dims(row, dimensions)
         })
         .collect();
     if rows.is_empty() {
-        rows.push(vec![0.0, 0.0, 0.0, 1.0]);
+        rows.push(pad_dims(vec![0.0, 0.0, 0.0, 1.0], dimensions));
     }
     rows
 }

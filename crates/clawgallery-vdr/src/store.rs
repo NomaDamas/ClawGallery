@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use super::{EmbeddingKind, PendingEmbedding, schema};
+use super::{EmbeddingKind, PendingEmbedding, schema, sparse::SparseVector};
 
 pub(super) fn open_store(db_path: &Path) -> Result<Connection> {
     if let Some(parent) = db_path.parent() {
@@ -41,6 +41,7 @@ pub(super) fn pending_embeddings(
     captions: &HashMap<PathBuf, CaptionDocument>,
     model: &str,
     dimensions: usize,
+    include_captions: bool,
 ) -> Result<Vec<PendingEmbedding>> {
     let mut pending = Vec::new();
     for image in images {
@@ -62,7 +63,7 @@ pub(super) fn pending_embeddings(
                 value: image.path.display().to_string(),
             });
         }
-        if let Some(caption) = captions.get(&image.path) {
+        if include_captions && let Some(caption) = captions.get(&image.path) {
             let caption_text = caption_text(caption);
             let caption_hash = schema::content_hash(&caption_text);
             if !has_current_vector(
@@ -92,10 +93,11 @@ pub(super) fn deactivate_existing_kind(
     conn: &Connection,
     image_id: &str,
     kind: EmbeddingKind,
+    model: &str,
 ) -> Result<()> {
     conn.execute(
-        "update vdr_embeddings set active = 0 where image_id = ?1 and kind = ?2",
-        params![image_id, kind.as_str()],
+        "update vdr_embeddings set active = 0 where image_id = ?1 and kind = ?2 and model = ?3",
+        params![image_id, kind.as_str(), model],
     )?;
     Ok(())
 }
@@ -135,11 +137,12 @@ pub(super) fn deactivate_stale_vectors(
     conn: &Connection,
     image_id: &str,
     sha256: &str,
+    model: &str,
 ) -> Result<()> {
     conn.execute(
         "update vdr_embeddings set active = 0
-         where image_id = ?1 and sha256 <> ?2 and active = 1",
-        params![image_id, sha256],
+         where image_id = ?1 and sha256 <> ?2 and active = 1 and model = ?3",
+        params![image_id, sha256, model],
     )?;
     Ok(())
 }
@@ -151,11 +154,46 @@ pub(super) fn insert_vector(
     dimensions: usize,
     vectors: &[Vec<f32>],
 ) -> Result<()> {
+    insert_encoded_vector(
+        conn,
+        item,
+        model,
+        dimensions,
+        "dense",
+        &serde_json::to_value(vectors)?,
+    )
+}
+
+pub(super) fn insert_sparse_vector(
+    conn: &Connection,
+    item: &PendingEmbedding,
+    model: &str,
+    dimensions: usize,
+    vector: &SparseVector,
+) -> Result<()> {
+    insert_encoded_vector(
+        conn,
+        item,
+        model,
+        dimensions,
+        "sparse",
+        &serde_json::to_value(vector)?,
+    )
+}
+
+fn insert_encoded_vector(
+    conn: &Connection,
+    item: &PendingEmbedding,
+    model: &str,
+    dimensions: usize,
+    encoding: &str,
+    vector_json: &serde_json::Value,
+) -> Result<()> {
     let path = item.path.to_string_lossy();
     conn.execute(
         "insert into vdr_embeddings
-         (image_id, path, sha256, kind, model, dimensions, content_hash, vector_json, active, indexed_at)
-         values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9)",
+         (image_id, path, sha256, kind, model, dimensions, content_hash, vector_json, encoding, active, indexed_at)
+         values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10)",
         params![
             item.image_id,
             path.as_ref(),
@@ -164,7 +202,8 @@ pub(super) fn insert_vector(
             model,
             dimensions,
             item.content_hash,
-            serde_json::to_string(vectors)?,
+            vector_json.to_string(),
+            encoding,
             Utc::now().to_rfc3339()
         ],
     )?;
@@ -179,7 +218,7 @@ pub(super) fn active_vectors(
 ) -> Result<Vec<StoredVector>> {
     let mut stmt = conn.prepare(
         "select image_id, kind, vector_json from vdr_embeddings
-         where active = 1 and model = ?1 and dimensions = ?2",
+         where active = 1 and encoding = 'dense' and model = ?1 and dimensions = ?2",
     )?;
     let rows = stmt.query_map(params![model, dimensions], |row| {
         let image_id: String = row.get(0)?;
@@ -237,9 +276,45 @@ fn caption_text(caption: &CaptionDocument) -> String {
     format!("{}\n{}", caption.title, caption.description)
 }
 
+pub(super) fn active_sparse_vectors(
+    conn: &Connection,
+    active_images: &HashMap<String, ImageDocument>,
+    model: &str,
+    dimensions: usize,
+) -> Result<Vec<StoredSparseVector>> {
+    let mut stmt = conn.prepare(
+        "select image_id, vector_json from vdr_embeddings
+         where active = 1 and encoding = 'sparse' and model = ?1 and dimensions = ?2",
+    )?;
+    let rows = stmt.query_map(params![model, dimensions], |row| {
+        let image_id: String = row.get(0)?;
+        let vector_json: String = row.get(1)?;
+        Ok((image_id, vector_json))
+    })?;
+    let mut vectors = Vec::new();
+    for row in rows {
+        let (image_id, vector_json) = row?;
+        if !active_images.contains_key(&image_id) {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(&vector_json)?;
+        vectors.push(StoredSparseVector {
+            image_id,
+            vector: crate::sparse::parse_sparse_vector(&value)?,
+        });
+    }
+    Ok(vectors)
+}
+
 #[derive(Debug)]
 pub(super) struct StoredVector {
     pub(super) image_id: String,
     pub(super) kind: EmbeddingKind,
     pub(super) vectors: Vec<Vec<f32>>,
+}
+
+#[derive(Debug)]
+pub(super) struct StoredSparseVector {
+    pub(super) image_id: String,
+    pub(super) vector: SparseVector,
 }

@@ -92,13 +92,14 @@ You'll need credentials for a provider (see [Vision model setup](#vision-model-s
 
 ### 3. Search
 
-By default, search is **hybrid**: it matches captions and filenames by keyword *and*, if you've built a visual index, finds images that *look* like your query.
+By default, search is **hybrid**: Reciprocal Rank Fusion over keyword matches, V-SPLADE lexical ranks (if you synced `--backend vsplade`), and dense VDR ranks (if you built a visual index).
 
 ```bash
 clawgallery search "login error"
 clawgallery search "login error" --json --limit 5
-clawgallery search --mode keyword "github actions"    # text only
-clawgallery search --mode embedding "sunset photo"    # visual only
+clawgallery search --mode keyword "github actions"    # caption/path text only
+clawgallery search --mode lexical "invoice total"     # V-SPLADE sparse retrieval
+clawgallery search --mode embedding "sunset photo"    # dense visual only
 ```
 
 Search understands fzf-style operators:
@@ -153,6 +154,18 @@ Or run it as a background service (see [Run as a background service](#run-as-a-b
 
 ---
 
+## Lexical search (V-SPLADE)
+
+[V-SPLADE](https://github.com/NomaDamas/SPLADE-mlx) encodes each page image into a sparse vocabulary vector. Queries are an inference-free lookup, then ClawGallery ranks by sparse dot product. This is the `--mode lexical` backend and one of the hybrid RRF lists.
+
+```bash
+CLAWGALLERY_PYTHON=/path/to/splade-mlx/.venv/bin/python \
+  clawgallery vdr sync --backend vsplade
+clawgallery search --mode lexical "invoice total"
+```
+
+Default model: `NomaDamas/v-splade-efficient-mlx` (Apache-2.0, 50368-dim vocabulary). Sparse postings are stored in `vdr.sqlite3` next to dense VDR rows and do not deactivate them.
+
 ## Visual search (VDR)
 
 "Visual Document Retrieval" is what lets ClawGallery find images by how they *look*, not just by their captions. It's optional — plain keyword search works without it — but it's what makes "find that screenshot of the error dialog" work even when the filename is garbage.
@@ -179,7 +192,8 @@ CLAWGALLERY_PYTHON="$(uv tool dir)/mlx-embeddings/bin/python" clawgallery vdr sy
 Then just search — the query is embedded automatically:
 
 ```bash
-clawgallery search "login error"              # hybrid (keyword + visual)
+clawgallery search "login error"              # hybrid RRF (keyword + lexical + visual)
+clawgallery search --mode lexical "invoice"   # V-SPLADE sparse retrieval
 clawgallery search --mode embedding "sunset"  # visual only
 clawgallery vdr status --json
 ```
@@ -350,9 +364,9 @@ clawgallery rename [--apply] [--dry-run] [--file <path>] [--style title|caption|
 clawgallery rename --undo [--last] [--file <path>] [--dry-run]
 clawgallery forget --file <path> [--delete]
 clawgallery dedup [--exact] [--similar] [--threshold <0..1>] [--json]
-clawgallery search [--mode keyword|embedding] <query...> [--limit <n>] [--json] [--case-sensitive] [--no-fuzzy] [--embedding-url <url>]
-clawgallery vdr sync [--prune] [--embedding-url <url>] [--model <model>] [--dimensions <n>] [--max-retries <n>] [--auto-start|--no-auto-start] [--backend mlx|jina-mlx] [--host <host>] [--port <port>] [--device auto|mps|cpu] [--python <path>] [--allow-remote]
-clawgallery vdr serve [--backend mlx|jina-mlx] [--host <host>] [--port <port>] [--model <model>] [--dimensions <n>] [--device auto|mps|cpu] [--python <path>] [--allow-remote]
+clawgallery search [--mode keyword|embedding|lexical|hybrid] <query...> [--limit <n>] [--json] [--case-sensitive] [--no-fuzzy] [--embedding-url <url>]
+clawgallery vdr sync [--prune] [--embedding-url <url>] [--model <model>] [--dimensions <n>] [--max-retries <n>] [--auto-start|--no-auto-start] [--backend mlx|jina-mlx|vsplade] [--host <host>] [--port <port>] [--device auto|mps|cpu] [--python <path>] [--allow-remote]
+clawgallery vdr serve [--backend mlx|jina-mlx|vsplade] [--host <host>] [--port <port>] [--model <model>] [--dimensions <n>] [--device auto|mps|cpu] [--python <path>] [--allow-remote]
 clawgallery vdr status [--json]
 clawgallery daemon install [--interval <seconds>] [--caption] [--sync] [--path <path>] [--folder <id>]
 clawgallery daemon start|stop|status|uninstall|logs

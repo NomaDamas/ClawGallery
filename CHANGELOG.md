@@ -5,6 +5,14 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- V-SPLADE lexical search (`search --mode lexical`) via the MLX port in [SPLADE-mlx](https://github.com/NomaDamas/SPLADE-mlx)
+- `vdr sync|serve --backend vsplade` stores sparse `{indices,values}` postings alongside dense VDR vectors
+- Hybrid search now Reciprocal-Rank-Fuses keyword + lexical + embedding lists (empty lists are skipped)
+
 ## [0.1.2] — 2026-08-17
 
 ### Fixed
