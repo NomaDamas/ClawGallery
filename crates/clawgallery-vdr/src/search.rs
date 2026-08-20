@@ -176,6 +176,9 @@ pub(super) fn lexical_search(
             continue;
         };
         let score = query_vector.dot(&stored.vector);
+        if score <= 0.0 {
+            continue;
+        }
         let caption = captions.get(&image.path);
         let hit = EmbeddingSearchHit {
             path: image.path.clone(),

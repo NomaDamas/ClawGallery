@@ -283,28 +283,21 @@ pub(super) fn active_sparse_vectors(
     dimensions: usize,
 ) -> Result<Vec<StoredSparseVector>> {
     let mut stmt = conn.prepare(
-        "select image_id, kind, vector_json from vdr_embeddings
+        "select image_id, vector_json from vdr_embeddings
          where active = 1 and encoding = 'sparse' and model = ?1 and dimensions = ?2",
     )?;
     let rows = stmt.query_map(params![model, dimensions], |row| {
         let image_id: String = row.get(0)?;
-        let kind: String = row.get(1)?;
-        let vector_json: String = row.get(2)?;
-        Ok((image_id, kind, vector_json))
+        let vector_json: String = row.get(1)?;
+        Ok((image_id, vector_json))
     })?;
     let mut vectors = Vec::new();
     for row in rows {
-        let (image_id, kind, vector_json) = row?;
+        let (image_id, vector_json) = row?;
         if !active_images.contains_key(&image_id) {
             continue;
         }
-        let kind = match kind.as_str() {
-            "image" => EmbeddingKind::Image,
-            "caption" => EmbeddingKind::Caption,
-            _ => continue,
-        };
         let value: serde_json::Value = serde_json::from_str(&vector_json)?;
-        let _ = kind;
         vectors.push(StoredSparseVector {
             image_id,
             vector: crate::sparse::parse_sparse_vector(&value)?,
