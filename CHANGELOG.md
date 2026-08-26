@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] — 2026-08-26
+
+### Fixed
+
+- V-SPLADE now checks the selected Python runtime for `splade_mlx` before starting a managed server and reports actionable setup instructions when it is unavailable
+- Documented V-SPLADE runtime selection, virtual-environment detection, and per-command managed-server usage
+
 ## [0.2.0] — 2026-08-20
 
 ### Added
