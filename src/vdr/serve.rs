@@ -104,6 +104,7 @@ fn run_python_server(args: &ServeArgs) -> Result<()> {
 
 fn start_python_server(args: &ServeArgs, announce: bool) -> Result<ManagedServer> {
     let python = resolve_python(args.python.as_ref());
+    check_python_runtime(args.backend, &python)?;
     let port = if args.port == 0 {
         choose_available_port(&args.host)?
     } else {
@@ -201,6 +202,36 @@ fn resolve_python(explicit: Option<&PathBuf>) -> PathBuf {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("python3"))
     })
+}
+
+fn check_python_runtime(backend: ServeBackend, python: &PathBuf) -> Result<()> {
+    if backend != ServeBackend::Vsplade
+        || env::var_os("CLAWGALLERY_VDR_VSPLADE_FAKE").is_some_and(|value| value == "1")
+    {
+        return Ok(());
+    }
+    let output = Command::new(python)
+        .args(["-c", "import splade_mlx"])
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to inspect V-SPLADE Python runtime {}",
+                python.display()
+            )
+        })?;
+    if output.status.success() {
+        return Ok(());
+    }
+    bail!(
+        "V-SPLADE runtime is unavailable in {}: could not import splade_mlx. \
+Install SPLADE-mlx in this environment, then retry with \
+--python {} or CLAWGALLERY_PYTHON={}. \
+Example: {} -m pip install git+https://github.com/NomaDamas/SPLADE-mlx.git",
+        python.display(),
+        python.display(),
+        python.display(),
+        python.display()
+    );
 }
 
 fn validate_bind_host(host: &str, allow_remote: bool) -> Result<()> {
