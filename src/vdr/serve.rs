@@ -86,6 +86,7 @@ fn start_managed_server(args: &ServeArgs, announce: bool) -> Result<ManagedServe
 
 fn run_python_server(args: &ServeArgs) -> Result<()> {
     let python = resolve_python(args.python.as_ref());
+    check_python_runtime(args.backend, &python)?;
     let mut command = python_command(args, &python, args.port);
     let status = command
         .stdin(Stdio::inherit())
@@ -198,10 +199,35 @@ fn wait_until_embed_reachable(
 
 fn resolve_python(explicit: Option<&PathBuf>) -> PathBuf {
     explicit.cloned().unwrap_or_else(|| {
-        env::var_os("CLAWGALLERY_PYTHON")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("python3"))
+        if let Some(python) = env::var_os("CLAWGALLERY_PYTHON") {
+            return PathBuf::from(python);
+        }
+        if let Some(virtual_env) = env::var_os("VIRTUAL_ENV")
+            && let Some(python) = virtual_env_python(PathBuf::from(virtual_env))
+        {
+            return python;
+        }
+        default_python()
     })
+}
+
+fn virtual_env_python(virtual_env: PathBuf) -> Option<PathBuf> {
+    let python = if cfg!(windows) {
+        virtual_env.join("Scripts").join("python.exe")
+    } else {
+        virtual_env.join("bin").join("python")
+    };
+    python.is_file().then_some(python)
+}
+
+#[cfg(windows)]
+fn default_python() -> PathBuf {
+    PathBuf::from("python")
+}
+
+#[cfg(not(windows))]
+fn default_python() -> PathBuf {
+    PathBuf::from("python3")
 }
 
 fn check_python_runtime(backend: ServeBackend, python: &PathBuf) -> Result<()> {
@@ -250,4 +276,32 @@ fn is_loopback_host(host: &str) -> bool {
     host.parse::<IpAddr>()
         .map(|address| address.is_loopback())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{default_python, virtual_env_python};
+    use std::fs;
+
+    #[test]
+    fn virtual_env_python_uses_platform_layout() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let python = if cfg!(windows) {
+            temp.path().join("Scripts").join("python.exe")
+        } else {
+            temp.path().join("bin").join("python")
+        };
+        fs::create_dir_all(python.parent().expect("python parent")).expect("python directory");
+        fs::write(&python, b"").expect("python file");
+
+        assert_eq!(virtual_env_python(temp.path().to_path_buf()), Some(python));
+    }
+
+    #[test]
+    fn default_python_uses_platform_name() {
+        assert_eq!(
+            default_python().file_name().expect("python filename"),
+            if cfg!(windows) { "python" } else { "python3" }
+        );
+    }
 }

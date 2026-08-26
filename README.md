@@ -166,13 +166,21 @@ clawgallery search --mode lexical "invoice total"
 
 The managed V-SPLADE server requires `splade_mlx` and its MLX dependencies in the
 Python interpreter used to start it. If `--python` and `CLAWGALLERY_PYTHON` are
-not set, ClawGallery uses `python3` but checks the runtime before starting the
-server and prints the exact interpreter and remediation when the dependency is
-missing. For example:
+not set, ClawGallery first uses an active `VIRTUAL_ENV` interpreter and then the
+platform default (`python3` on macOS/Linux, `python` on Windows). It checks the
+runtime before starting the server and prints the exact interpreter and
+remediation when the dependency is missing. For example:
 
 ```bash
 python3 -m pip install git+https://github.com/NomaDamas/SPLADE-mlx.git
 CLAWGALLERY_PYTHON=python3 clawgallery vdr sync --backend vsplade
+```
+
+On Windows, install the same package into the active environment and use:
+
+```powershell
+python -m pip install git+https://github.com/NomaDamas/SPLADE-mlx.git
+clawgallery vdr sync --backend vsplade
 ```
 
 Default model: `NomaDamas/v-splade-efficient-mlx` (Apache-2.0, 50368-dim vocabulary). Sparse postings are stored in `vdr.sqlite3` next to dense VDR rows and do not deactivate them.
