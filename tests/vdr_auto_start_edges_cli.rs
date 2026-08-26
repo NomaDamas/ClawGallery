@@ -92,3 +92,40 @@ fn vdr_auto_start_missing_python_path_fails_cleanly() {
         "expected missing interpreter in error, got: {stderr}"
     );
 }
+
+#[test]
+fn vdr_vsplade_missing_runtime_fails_with_actionable_diagnostic() {
+    let (temp, config) = one_image_library();
+    let fake_python = temp.path().join("python-without-splade");
+    std::os::unix::fs::symlink("/usr/bin/false", &fake_python).expect("fake python");
+
+    let output = run_without_embedding_url(
+        &config,
+        &[
+            "vdr",
+            "sync",
+            "--backend",
+            "vsplade",
+            "--python",
+            fake_python.to_str().expect("utf8"),
+            "--max-retries",
+            "0",
+        ],
+        None,
+    );
+
+    assert!(!output.status.success(), "sync should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("V-SPLADE runtime is unavailable")
+            && stderr.contains("splade_mlx")
+            && stderr.contains("--python")
+            && stderr.contains("CLAWGALLERY_PYTHON")
+            && stderr.contains("pip install"),
+        "expected actionable runtime diagnostic, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Traceback"),
+        "raw Python traceback should not leak, got: {stderr}"
+    );
+}

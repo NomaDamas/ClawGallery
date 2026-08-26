@@ -78,12 +78,44 @@ Search atoms follow fzf-like rules for the keyword side: whitespace means AND, `
 Use the MLX V-SPLADE runtime from [SPLADE-mlx](https://github.com/NomaDamas/SPLADE-mlx) for sparse visual-lexical retrieval. Point `CLAWGALLERY_PYTHON` at an environment with `splade-mlx`, `mlx`, `transformers`, `numpy`, and `pillow`:
 
 ```bash
-CLAWGALLERY_PYTHON=/path/to/splade-mlx/.venv/bin/python \
-  clawgallery vdr sync --backend vsplade
+export CLAWGALLERY_PYTHON=/path/to/splade-mlx/.venv/bin/python
+clawgallery vdr sync --backend vsplade
 clawgallery search --mode lexical "invoice total" --json
 ```
 
 Default model `NomaDamas/v-splade-efficient-mlx`, dimensions `50368`. The index stores sparse `{indices,values}` postings and can coexist with a dense VDR index. Hybrid search fuses keyword + lexical + embedding ranks with RRF (`k=60`).
+
+Keep `CLAWGALLERY_PYTHON` exported for both `vdr sync` and every later
+`search` command. Managed servers are started per command, so setting the
+variable only on the sync command does not configure the subsequent search.
+ClawGallery checks the selected interpreter for `splade_mlx` before starting
+the server; if it is missing, install the runtime into that same environment
+or pass its interpreter explicitly with `--python`:
+
+```bash
+python3 -m pip install git+https://github.com/NomaDamas/SPLADE-mlx.git
+export CLAWGALLERY_PYTHON="$(pwd)/.venv/bin/python"
+clawgallery vdr sync --backend vsplade
+clawgallery search --mode lexical "invoice total" --json
+```
+
+With an activated virtual environment, ClawGallery also uses its
+`bin/python` interpreter on macOS/Linux or `Scripts/python.exe` on Windows.
+Without `CLAWGALLERY_PYTHON` or an active environment, it falls back to
+`python3` on macOS/Linux and `python` on Windows. This fallback does not
+install dependencies automatically. For a one-off command, use:
+
+```bash
+clawgallery vdr sync --backend vsplade --python /path/to/splade-mlx/.venv/bin/python
+CLAWGALLERY_PYTHON=/path/to/splade-mlx/.venv/bin/python \
+  clawgallery search --mode lexical "invoice total" --json
+```
+
+The managed server downloads and caches model weights on first use, then is
+terminated automatically when the command exits. Use `--embedding-url` to
+reuse an already-running compatible server, or `--no-auto-start` when an
+external server is required. A missing Python dependency is a setup error,
+not an index corruption error; the existing SQLite index remains intact.
 
 ## VDR model setup
 
