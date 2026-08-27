@@ -1587,6 +1587,14 @@ struct SearchResult {
     matched_atoms: Vec<String>,
     source: HitSource,
     discovered_at: DateTime<Utc>,
+    retrieval: Option<HybridRetrieval>,
+}
+
+#[derive(Debug, Clone)]
+struct HybridRetrieval {
+    used: Vec<&'static str>,
+    skipped: Vec<&'static str>,
+    degraded: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1977,6 +1985,7 @@ fn search_result_from_keyword_hit(hit: &SearchHit, candidate: &SearchCandidate) 
         matched_atoms: hit.matched_atoms.clone(),
         source: hit.source,
         discovered_at: candidate.discovered_at,
+        retrieval: None,
     }
 }
 
@@ -1996,6 +2005,7 @@ fn search_result_from_embedding_hit(hit: clawgallery_vdr::EmbeddingSearchHit) ->
         matched_atoms: hit.matched_atoms,
         source,
         discovered_at: Utc::now(),
+        retrieval: None,
     }
 }
 
@@ -2012,19 +2022,52 @@ fn print_text_search_result(hit: &SearchResult) {
 }
 
 fn print_json_search_result(hit: &SearchResult) -> Result<()> {
-    println!(
-        "{}",
-        serde_json::to_string(&json!({
-            "path": hit.path_raw,
-            "title": hit.title,
-            "description": hit.description,
-            "score": hit.score,
-            "matched_field": hit.matched_field,
-            "matched_atoms": hit.matched_atoms,
-            "source": hit.source,
-        }))?
-    );
+    let mut value = json!({
+        "path": hit.path_raw,
+        "title": hit.title,
+        "description": hit.description,
+        "score": hit.score,
+        "matched_field": hit.matched_field,
+        "matched_atoms": hit.matched_atoms,
+        "source": hit.source,
+    });
+    if let Some(retrieval) = &hit.retrieval {
+        value["used_channels"] = json!(retrieval.used);
+        value["skipped_channels"] = json!(retrieval.skipped);
+        value["degraded"] = json!(retrieval.degraded);
+    }
+    println!("{}", serde_json::to_string(&value)?);
     Ok(())
+}
+
+fn hybrid_retrieval(dense: bool, sparse: bool) -> HybridRetrieval {
+    let mut used = vec!["keyword"];
+    let mut skipped = Vec::new();
+    if dense {
+        used.push("embedding");
+    } else {
+        skipped.push("embedding");
+    }
+    if sparse {
+        used.push("lexical");
+    } else {
+        skipped.push("lexical");
+    }
+    HybridRetrieval {
+        used,
+        skipped,
+        degraded: !dense || !sparse,
+    }
+}
+
+fn print_hybrid_retrieval_diagnostic(retrieval: &HybridRetrieval) {
+    if retrieval.degraded {
+        eprintln!(
+            "(hybrid degraded: used {}; skipped {})",
+            retrieval.used.join(", "),
+            retrieval.skipped.join(", ")
+        );
+    }
 }
 
 fn keyword_search_hits(
@@ -2223,6 +2266,9 @@ fn cmd_search(paths: &AppPaths, args: SearchArgs) -> Result<()> {
         println!("(no fuzzy matches; falling back to typo-tolerant search)");
     }
     if matches!(args.mode, SearchMode::Hybrid) {
+        let dense_available = vdr::latest_dense_index_config(&paths.vdr_db)?.is_some();
+        let sparse_available = vdr::latest_sparse_index_config(&paths.vdr_db)?.is_some();
+        let retrieval = hybrid_retrieval(dense_available, sparse_available);
         let embedding_hits = vdr::embedding_search_hits(
             paths,
             &query,
@@ -2241,12 +2287,18 @@ fn cmd_search(paths: &AppPaths, args: SearchArgs) -> Result<()> {
             latest_images(paths)?,
             latest_captions_by_path(paths)?,
         )?;
-        let results = merge_hybrid_results(
+        let mut results = merge_hybrid_results(
             &hits.iter().take(keyword_limit).cloned().collect::<Vec<_>>(),
             vec![lexical_hits, embedding_hits],
             &candidates,
             args.limit,
         );
+        for result in &mut results {
+            result.retrieval = Some(retrieval.clone());
+        }
+        if !args.json {
+            print_hybrid_retrieval_diagnostic(&retrieval);
+        }
         for result in results {
             if args.json {
                 print_json_search_result(&result)?;
