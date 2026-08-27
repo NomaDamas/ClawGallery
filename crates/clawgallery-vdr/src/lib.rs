@@ -14,7 +14,7 @@ mod sparse;
 mod store;
 
 pub use client::DEFAULT_MAX_RETRIES;
-pub use index::{ActiveIndexConfig, VdrStatus};
+pub use index::{ActiveIndexConfig, IndexChannelStatus, VdrStatus};
 pub use search::{EmbeddingSearchHit, late_interaction_score};
 pub use sparse::{SparseVector, rrf_score};
 

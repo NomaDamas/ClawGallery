@@ -92,7 +92,9 @@ You'll need credentials for a provider (see [Vision model setup](#vision-model-s
 
 ### 3. Search
 
-By default, search is **hybrid**: Reciprocal Rank Fusion over keyword matches, V-SPLADE lexical ranks (if you synced `--backend vsplade`), and dense VDR ranks (if you built a visual index).
+By default, search is **hybrid**: Reciprocal Rank Fusion over keyword matches, V-SPLADE lexical ranks (if you synced `--backend vsplade`), and dense VDR ranks (if you built a visual index). Missing vector channels degrade instead of failing: keyword-only, keyword+dense, or keyword+sparse. Hybrid `--json` rows include `used_channels`, `skipped_channels`, and `degraded` so callers can tell a true hybrid result from a degraded one.
+
+`--mode embedding` requires an active dense index; `--mode lexical` requires an active V-SPLADE index. Both fail before starting a query-embedding server and print the `vdr sync` command needed to build the missing index. `--mode keyword` always searches captions/paths and never needs a VDR server.
 
 ```bash
 clawgallery search "login error"
@@ -100,6 +102,7 @@ clawgallery search "login error" --json --limit 5
 clawgallery search --mode keyword "github actions"    # caption/path text only
 clawgallery search --mode lexical "invoice total"     # V-SPLADE sparse retrieval
 clawgallery search --mode embedding "sunset photo"    # dense visual only
+clawgallery vdr status --json                         # dense vs sparse availability
 ```
 
 Search understands fzf-style operators:

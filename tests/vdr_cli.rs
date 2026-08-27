@@ -745,6 +745,16 @@ fn embedding_search_uses_latest_index_model_and_dimensions() {
 
     // Then: search uses the latest active index config instead of default dimensions.
     assert!(search.contains("dog.png"), "got: {search}");
+    let status: serde_json::Value = serde_json::from_str(&assert_success(run(
+        &config,
+        &["vdr", "status", "--json"],
+        server.url(),
+    )))
+    .expect("status json");
+    assert_eq!(status["dense"]["available"], true);
+    assert_eq!(status["dense"]["model"], "custom-jina");
+    assert_eq!(status["dense"]["dimensions"], 4);
+    assert_eq!(status["sparse"]["available"], false);
 }
 
 #[test]
@@ -774,6 +784,19 @@ fn keyword_search_without_embedding_preserves_fuzzy_ranking() {
             .expect("json result");
     assert_eq!(first["source"], "fuzzy");
     assert!(first["path"].as_str().expect("path").ends_with("login.png"));
+    assert_eq!(first["degraded"], true);
+    assert_eq!(first["used_channels"], serde_json::json!(["keyword"]));
+    let skipped = first["skipped_channels"]
+        .as_array()
+        .expect("skipped channels");
+    assert!(
+        skipped.iter().any(|value| value == "embedding"),
+        "keyword-only hybrid should skip embedding, got: {first}"
+    );
+    assert!(
+        skipped.iter().any(|value| value == "lexical"),
+        "keyword-only hybrid should skip lexical, got: {first}"
+    );
     assert_eq!(
         server.request_count(),
         0,
@@ -946,6 +969,16 @@ fn dense_and_sparse_indexes_coexist_after_separate_syncs() {
         status["active_vectors"], 3,
         "dense image+caption plus sparse image must stay active, got: {status}"
     );
+    assert_eq!(status["keyword"], true);
+    assert_eq!(status["hybrid"], true);
+    assert_eq!(status["dense"]["available"], true);
+    assert_eq!(status["dense"]["model"], "dense-test");
+    assert_eq!(status["dense"]["dimensions"], 4);
+    assert_eq!(status["dense"]["active_vectors"], 2);
+    assert_eq!(status["sparse"]["available"], true);
+    assert_eq!(status["sparse"]["model"], "vsplade-test");
+    assert_eq!(status["sparse"]["dimensions"], 8);
+    assert_eq!(status["sparse"]["active_vectors"], 1);
 
     let embedding = assert_success(run(
         &config,
@@ -1048,5 +1081,286 @@ fn lexical_search_without_index_explains_how_to_build_it() {
     assert!(
         stderr.contains("vdr sync --backend vsplade"),
         "got: {stderr}"
+    );
+}
+
+#[test]
+fn vdr_status_json_reports_missing_indexes_separately() {
+    let server = FakeEmbeddingServer::start();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).expect("create images");
+    fs::write(images.join("dog.png"), b"dog image bytes").expect("write dog image");
+    assert_success(run(&config, &["init"], server.url()));
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", images.to_str().expect("utf8")],
+        server.url(),
+    ));
+
+    let status: serde_json::Value = serde_json::from_str(&assert_success(run(
+        &config,
+        &["vdr", "status", "--json"],
+        server.url(),
+    )))
+    .expect("status json");
+    assert_eq!(status["keyword"], true);
+    assert_eq!(status["hybrid"], true);
+    assert_eq!(status["dense"]["available"], false);
+    assert_eq!(status["dense"]["active_vectors"], 0);
+    assert_eq!(status["sparse"]["available"], false);
+    assert_eq!(status["sparse"]["active_vectors"], 0);
+    assert_eq!(status["active_vectors"], 0);
+}
+
+#[test]
+fn embedding_search_without_dense_index_fails_before_query_embedding() {
+    let server = FakeEmbeddingServer::start();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).expect("create images");
+    fs::write(images.join("dog.png"), b"dog image bytes").expect("write dog image");
+    assert_success(run(&config, &["init"], server.url()));
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", images.to_str().expect("utf8")],
+        server.url(),
+    ));
+    let before = server.request_count();
+
+    let output = run(
+        &config,
+        &["search", "--mode", "embedding", "sunset photo", "--json"],
+        server.url(),
+    );
+
+    assert!(
+        !output.status.success(),
+        "missing dense index must fail before query embedding"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no dense VDR index"), "got: {stderr}");
+    assert!(stderr.contains("vdr sync --backend mlx"), "got: {stderr}");
+    assert_eq!(
+        server.request_count(),
+        before,
+        "embedding mode must not call the query endpoint without a dense index"
+    );
+}
+
+#[test]
+fn sparse_only_library_rejects_embedding_mode_and_accepts_lexical() {
+    let server = FakeEmbeddingServer::start();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).expect("create images");
+    fs::write(images.join("dog.png"), b"dog image bytes").expect("write dog image");
+    assert_success(run(&config, &["init"], server.url()));
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", images.to_str().expect("utf8")],
+        server.url(),
+    ));
+    let (dog_id, dog_path) = image_id_for(&config, "dog.png");
+    write_caption(&config, &dog_id, &dog_path, "Animal Photo", "puppy playing");
+    assert_success(run(
+        &config,
+        &[
+            "vdr",
+            "sync",
+            "--backend",
+            "vsplade",
+            "--model",
+            "vsplade-test",
+            "--dimensions",
+            "8",
+        ],
+        server.url(),
+    ));
+    let after_sync = server.request_count();
+
+    let output = run(
+        &config,
+        &["search", "--mode", "embedding", "dog", "--json"],
+        server.url(),
+    );
+    assert!(
+        !output.status.success(),
+        "sparse-only library must reject embedding mode"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no dense VDR index"), "got: {stderr}");
+    assert!(stderr.contains("vdr sync --backend mlx"), "got: {stderr}");
+    assert_eq!(
+        server.request_count(),
+        after_sync,
+        "embedding mode must not query-embed against a sparse-only index"
+    );
+
+    let lexical = assert_success(run(
+        &config,
+        &["search", "--mode", "lexical", "dog", "--json"],
+        server.url(),
+    ));
+    let row: serde_json::Value =
+        serde_json::from_str(lexical.lines().next().expect("lexical hit")).expect("json");
+    assert_eq!(row["source"], "lexical");
+    assert!(row["path"].as_str().expect("path").ends_with("dog.png"));
+}
+
+#[test]
+fn dense_only_library_rejects_lexical_mode_and_accepts_embedding() {
+    let server = FakeEmbeddingServer::start();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).expect("create images");
+    fs::write(images.join("dog.png"), b"dog image bytes").expect("write dog image");
+    assert_success(run(&config, &["init"], server.url()));
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", images.to_str().expect("utf8")],
+        server.url(),
+    ));
+    let (dog_id, dog_path) = image_id_for(&config, "dog.png");
+    write_caption(&config, &dog_id, &dog_path, "Animal Photo", "puppy playing");
+    assert_success(run(
+        &config,
+        &["vdr", "sync", "--model", "dense-test", "--dimensions", "4"],
+        server.url(),
+    ));
+    let after_sync = server.request_count();
+
+    let output = run(
+        &config,
+        &["search", "--mode", "lexical", "dog", "--json"],
+        server.url(),
+    );
+    assert!(
+        !output.status.success(),
+        "dense-only library must reject lexical mode"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("vdr sync --backend vsplade"),
+        "got: {stderr}"
+    );
+    assert_eq!(
+        server.request_count(),
+        after_sync,
+        "lexical mode must not query-embed against a dense-only index"
+    );
+
+    let embedding = assert_success(run(
+        &config,
+        &["search", "--mode", "embedding", "dog", "--json"],
+        server.url(),
+    ));
+    let row: serde_json::Value =
+        serde_json::from_str(embedding.lines().next().expect("embedding hit")).expect("json");
+    assert_eq!(row["source"], "embedding");
+    assert!(row["path"].as_str().expect("path").ends_with("dog.png"));
+}
+
+#[test]
+fn hybrid_search_with_dense_and_sparse_reports_both_channels() {
+    let server = FakeEmbeddingServer::start();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).expect("create images");
+    fs::write(images.join("dog.png"), b"dog image bytes").expect("write dog image");
+    assert_success(run(&config, &["init"], server.url()));
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", images.to_str().expect("utf8")],
+        server.url(),
+    ));
+    let (dog_id, dog_path) = image_id_for(&config, "dog.png");
+    write_caption(&config, &dog_id, &dog_path, "Animal Photo", "puppy playing");
+    assert_success(run(
+        &config,
+        &["vdr", "sync", "--model", "dense-test", "--dimensions", "4"],
+        server.url(),
+    ));
+    assert_success(run(
+        &config,
+        &[
+            "vdr",
+            "sync",
+            "--backend",
+            "vsplade",
+            "--model",
+            "vsplade-test",
+            "--dimensions",
+            "8",
+        ],
+        server.url(),
+    ));
+
+    let stdout = assert_success(run(
+        &config,
+        &["search", "dog", "--json", "--limit", "5"],
+        server.url(),
+    ));
+    let rows: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("json result"))
+        .collect();
+    assert!(
+        !rows.is_empty(),
+        "hybrid search should return hits, got: {stdout}"
+    );
+    for row in &rows {
+        assert_eq!(row["degraded"], false, "got: {row}");
+        let used = row["used_channels"].as_array().expect("used channels");
+        assert!(used.iter().any(|value| value == "keyword"), "got: {row}");
+        assert!(used.iter().any(|value| value == "embedding"), "got: {row}");
+        assert!(used.iter().any(|value| value == "lexical"), "got: {row}");
+        assert_eq!(row["skipped_channels"], serde_json::json!([]));
+    }
+    assert!(
+        rows.iter().any(|row| {
+            let path = row["path"].as_str().expect("path");
+            let fields = row["matched_field"].as_str().unwrap_or_default();
+            path.ends_with("dog.png") && fields.contains("lexical") && fields.contains("embedding")
+        }),
+        "hybrid output should include lexical and embedding contributions, got: {stdout}"
+    );
+}
+
+#[test]
+fn keyword_mode_works_without_vector_indexes() {
+    let server = FakeEmbeddingServer::start();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).expect("create images");
+    fs::write(images.join("login.png"), b"login").expect("write image");
+    assert_success(run(&config, &["init"], server.url()));
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", images.to_str().expect("utf8")],
+        server.url(),
+    ));
+    let (id, path) = image_id_for(&config, "login.png");
+    write_caption(&config, &id, &path, "Login Dialog", "A settings screen");
+
+    let stdout = assert_success(run(
+        &config,
+        &["search", "--mode", "keyword", "login", "--json"],
+        server.url(),
+    ));
+    let first: serde_json::Value =
+        serde_json::from_str(stdout.lines().next().expect("keyword result")).expect("json");
+    assert_eq!(first["source"], "fuzzy");
+    assert!(first["path"].as_str().expect("path").ends_with("login.png"));
+    assert_eq!(
+        server.request_count(),
+        0,
+        "keyword mode must not call the embedding server"
     );
 }

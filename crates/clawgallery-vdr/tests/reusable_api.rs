@@ -67,6 +67,14 @@ fn reusable_vdr_api_indexes_and_searches_documents() {
     assert_eq!(hits[0].score, 1.0);
     assert_eq!(vdr_status.active_images, 1);
     assert_eq!(vdr_status.active_vectors, 2);
+    assert!(vdr_status.keyword);
+    assert!(vdr_status.hybrid);
+    assert!(vdr_status.dense.available);
+    assert_eq!(vdr_status.dense.model.as_deref(), Some("test-model"));
+    assert_eq!(vdr_status.dense.dimensions, Some(4));
+    assert_eq!(vdr_status.dense.active_vectors, 2);
+    assert!(!vdr_status.sparse.available);
+    assert_eq!(vdr_status.sparse.active_vectors, 0);
 }
 
 struct FakeEmbeddingServer {

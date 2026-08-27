@@ -5,6 +5,14 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `vdr status --json` reports dense and sparse index availability separately, including model, dimensions, and active vector counts
+- Hybrid search JSON now includes `used_channels`, `skipped_channels`, and `degraded` so callers can distinguish true hybrid results from keyword-only or single-channel fusion
+- `--mode embedding` and `--mode lexical` fail before query embedding when the matching index is missing, with the exact `vdr sync` command needed to build it
+
 ## [0.2.1] — 2026-08-26
 
 ### Fixed

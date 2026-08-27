@@ -4,8 +4,8 @@ use clap::{Args, Subcommand};
 use clawgallery_vdr::{
     CaptionDocument, EmbeddingSearchHit, ImageDocument, SearchConfig, SyncConfig, SyncOutcome,
     VectorEncoding, deactivate_image_vectors as deactivate_library_vectors, embedding_search,
-    latest_dense_index_config, latest_sparse_index_config, lexical_search, pending_embedding_count,
-    similar_image_groups as library_similar_image_groups, status as library_status, sync,
+    lexical_search, pending_embedding_count, similar_image_groups as library_similar_image_groups,
+    status as library_status, sync,
 };
 use std::{collections::HashMap, env, path::PathBuf};
 
@@ -13,9 +13,12 @@ mod backend;
 mod serve;
 
 pub(crate) use backend::ServeBackend;
-use backend::{DEFAULT_MANAGED_HOST, DEFAULT_MLX_DIMENSIONS, DEFAULT_MLX_MODEL, resolve_backend};
+use backend::{DEFAULT_MANAGED_HOST, resolve_backend};
 pub(crate) use clawgallery_vdr::SimilarImageGroup;
-pub(crate) use clawgallery_vdr::{DEFAULT_DIMENSIONS, DEFAULT_MAX_RETRIES, DEFAULT_VDR_MODEL};
+pub(crate) use clawgallery_vdr::{
+    DEFAULT_DIMENSIONS, DEFAULT_MAX_RETRIES, DEFAULT_VDR_MODEL, latest_dense_index_config,
+    latest_sparse_index_config,
+};
 
 #[derive(Debug, Args)]
 pub(crate) struct VdrArgs {
@@ -191,8 +194,28 @@ fn cmd_status(paths: &AppPaths, args: VdrStatusArgs) -> Result<()> {
         if let Some(dimensions) = status.dimensions {
             println!("dimensions: {dimensions}");
         }
+        println!("keyword: {}", status.keyword);
+        println!("{}", format_channel("dense", &status.dense));
+        println!("{}", format_channel("sparse", &status.sparse));
+        println!("hybrid: {}", status.hybrid);
     }
     Ok(())
+}
+
+fn format_channel(name: &str, channel: &clawgallery_vdr::IndexChannelStatus) -> String {
+    if channel.available {
+        format!(
+            "{name}: available model={} dimensions={} active_vectors={}",
+            channel.model.as_deref().unwrap_or("<unknown>"),
+            channel
+                .dimensions
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "<unknown>".to_string()),
+            channel.active_vectors
+        )
+    } else {
+        format!("{name}: missing")
+    }
 }
 
 fn encoding_for(backend: ServeBackend) -> VectorEncoding {
@@ -211,14 +234,14 @@ pub(crate) fn embedding_search_hits(
     images: Vec<ImageRecord>,
     captions: HashMap<PathBuf, CaptionRecord>,
 ) -> Result<Vec<EmbeddingSearchHit>> {
-    let index = latest_dense_index_config(&paths.vdr_db)?;
-    if index.is_none() && skip_empty_index {
-        return Ok(Vec::new());
-    }
-    let (model, dimensions) = match index {
-        Some(index) => (index.model, index.dimensions),
-        None => (DEFAULT_MLX_MODEL.to_string(), DEFAULT_MLX_DIMENSIONS),
+    let Some(index) = latest_dense_index_config(&paths.vdr_db)? else {
+        if skip_empty_index {
+            return Ok(Vec::new());
+        }
+        bail!("no dense VDR index; run `clawgallery vdr sync --backend mlx`");
     };
+    let model = index.model;
+    let dimensions = index.dimensions;
     let backend = resolve_backend(None, Some(&model), Some(dimensions))?;
     let env_embedding_url = env::var("CLAWGALLERY_VDR_EMBEDDING_URL").ok();
     let managed_server = if embedding_url.is_none() && env_embedding_url.is_none() {

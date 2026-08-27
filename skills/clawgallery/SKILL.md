@@ -71,7 +71,7 @@ clawgallery search "'github" "actions" --json
 clawgallery search "!error" "^login"
 ```
 
-Search atoms follow fzf-like rules for the keyword side: whitespace means AND, `'foo` exact substring, `^foo` prefix, `foo$` suffix, `!foo` exclusion, and `\ ` literal space. When a VDR or V-SPLADE index exists, default search fuses those rankings with keyword search via Reciprocal Rank Fusion. Add `--mode keyword` for caption/path keyword search only, `--mode lexical` for V-SPLADE sparse retrieval, `--mode embedding` for dense VDR only, or `--no-fuzzy` for old exact-substring behavior.
+Search atoms follow fzf-like rules for the keyword side: whitespace means AND, `'foo` exact substring, `^foo` prefix, `foo$` suffix, `!foo` exclusion, and `\ ` literal space. When a VDR or V-SPLADE index exists, default search fuses those rankings with keyword search via Reciprocal Rank Fusion and reports `used_channels`, `skipped_channels`, and `degraded` on `--json` rows. Missing vector channels degrade; they do not fail hybrid search. Add `--mode keyword` for caption/path keyword search only, `--mode lexical` for V-SPLADE sparse retrieval, `--mode embedding` for dense VDR only, or `--no-fuzzy` for old exact-substring behavior. `--mode embedding` and `--mode lexical` fail immediately when the matching index is absent and include the `vdr sync` command to build it. Inspect availability with `clawgallery vdr status --json` (`dense` / `sparse` objects).
 
 ## V-SPLADE lexical search
 
