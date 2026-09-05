@@ -28,3 +28,15 @@ jobs:
         run: cargo build --all-features
       - name: Package library crate
         run: cargo package -p clawgallery-vdr
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Verify Windows build and tests
+        run: |
+          cargo fmt --all -- --check
+          cargo test --workspace --all-features
+          cargo build --workspace --all-features
