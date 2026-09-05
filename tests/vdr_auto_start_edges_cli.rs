@@ -95,6 +95,7 @@ fn vdr_auto_start_missing_python_path_fails_cleanly() {
 
 #[cfg(unix)]
 #[test]
+#[cfg(unix)]
 fn vdr_vsplade_missing_runtime_fails_with_actionable_diagnostic() {
     let (temp, config) = one_image_library();
     let fake_python = temp.path().join("python-without-splade");
@@ -119,7 +120,6 @@ fn vdr_vsplade_missing_runtime_fails_with_actionable_diagnostic() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("V-SPLADE runtime is unavailable")
-            && stderr.contains("splade_mlx")
             && stderr.contains("--python")
             && stderr.contains("CLAWGALLERY_PYTHON")
             && stderr.contains("pip install"),

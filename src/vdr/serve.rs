@@ -14,6 +14,7 @@ const MLX_SERVER: &str = include_str!("../../scripts/mlx_embeddings_server.py");
 const JINA_MLX_SERVER: &str = include_str!("../../scripts/jina_mlx_embeddings_server.py");
 const COLQWEN_SERVER: &str = include_str!("../../scripts/colqwen2_server.py");
 const VSPLADE_SERVER: &str = include_str!("../../scripts/vsplade_server.py");
+const VSPLADE_TORCH_SERVER: &str = include_str!("../../scripts/vsplade_torch_server.py");
 const MANAGED_STARTUP_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
 impl ServeBackend {
@@ -31,7 +32,13 @@ impl ServeBackend {
             Self::Mlx => MLX_SERVER,
             Self::JinaMlx => JINA_MLX_SERVER,
             Self::Colqwen => COLQWEN_SERVER,
-            Self::Vsplade => VSPLADE_SERVER,
+            Self::Vsplade => {
+                if cfg!(windows) {
+                    VSPLADE_TORCH_SERVER
+                } else {
+                    VSPLADE_SERVER
+                }
+            }
         }
     }
 }
@@ -255,13 +262,29 @@ fn check_python_runtime(backend: ServeBackend, python: &PathBuf) -> Result<()> {
             fake_env_enabled("CLAWGALLERY_VDR_COLQWEN_FAKE"),
         ),
         ServeBackend::Vsplade => (
-            "import splade_mlx",
+            if cfg!(windows) {
+                "import torch, transformers, PIL"
+            } else {
+                "import splade_mlx"
+            },
             fake_env_enabled("CLAWGALLERY_VDR_VSPLADE_FAKE"),
         ),
         ServeBackend::Mlx | ServeBackend::JinaMlx => return Ok(()),
     };
     if fake {
         return Ok(());
+    }
+    if cfg!(windows)
+        && backend == ServeBackend::Vsplade
+        && env::var_os("CLAWGALLERY_VSPLADE_REPO").is_none()
+    {
+        bail!(
+            "V-SPLADE Windows runtime is not configured: set \
+CLAWGALLERY_VSPLADE_REPO to a checkout of https://github.com/naver/v-splade \
+before retrying with --python {} or CLAWGALLERY_PYTHON={}",
+            python.display(),
+            python.display()
+        );
     }
     let output = Command::new(python)
         .args(["-c", import])
@@ -289,10 +312,11 @@ Example: {} -m pip install colpali-engine torch transformers pillow huggingface_
         );
     }
     bail!(
-        "V-SPLADE runtime is unavailable in {}: could not import splade_mlx. \
-Install SPLADE-mlx in this environment, then retry with \
+        "V-SPLADE runtime is unavailable in {}: the selected interpreter cannot \
+load the supported backend dependencies. Install the Windows PyTorch runtime \
+or SPLADE-mlx as appropriate, then retry with \
 --python {} or CLAWGALLERY_PYTHON={}. \
-Example: {} -m pip install git+https://github.com/NomaDamas/SPLADE-mlx.git",
+Example: {} -m pip install torch transformers pillow",
         python.display(),
         python.display(),
         python.display(),
