@@ -69,7 +69,24 @@ def load_encoder(model_name: str, device_name: str):
     import torch  # type: ignore[import-not-found]
 
     device = "cuda" if device_name in {"auto", "cuda"} and torch.cuda.is_available() else "cpu"
-    return VSPLADEInference.from_pretrained(model_name, device=device, dtype=torch.float32)
+    return VSPLADEInference.from_pretrained(
+        resolve_model_dir(model_name), device=device, dtype=torch.float32
+    )
+
+
+def resolve_model_dir(model_name: str) -> str:
+    """Return a local directory for ``model_name``.
+
+    The upstream helper wraps its argument in ``pathlib.Path``, which rewrites a
+    Hugging Face repo id such as ``naver/v-splade-efficient`` into
+    ``naver\\v-splade-efficient`` on Windows and is then rejected as a repo id.
+    Resolving the snapshot here keeps a plain local path on every platform.
+    """
+    if Path(model_name).is_dir():
+        return model_name
+    from huggingface_hub import snapshot_download
+
+    return snapshot_download(model_name)
 
 
 def to_sparse(vector, dimensions: int) -> dict[str, list[float] | list[int]]:
