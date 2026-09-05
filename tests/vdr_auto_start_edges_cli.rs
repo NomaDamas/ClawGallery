@@ -93,6 +93,7 @@ fn vdr_auto_start_missing_python_path_fails_cleanly() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 #[cfg(unix)]
 fn vdr_vsplade_missing_runtime_fails_with_actionable_diagnostic() {

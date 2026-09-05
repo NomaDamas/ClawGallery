@@ -1142,7 +1142,14 @@ fn embedding_search_without_dense_index_fails_before_query_embedding() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("no dense VDR index"), "got: {stderr}");
-    assert!(stderr.contains("vdr sync --backend mlx"), "got: {stderr}");
+    assert!(
+        stderr.contains(if cfg!(windows) {
+            "vdr sync --backend colqwen"
+        } else {
+            "vdr sync --backend mlx"
+        }),
+        "got: {stderr}"
+    );
     assert_eq!(
         server.request_count(),
         before,
@@ -1193,7 +1200,14 @@ fn sparse_only_library_rejects_embedding_mode_and_accepts_lexical() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("no dense VDR index"), "got: {stderr}");
-    assert!(stderr.contains("vdr sync --backend mlx"), "got: {stderr}");
+    assert!(
+        stderr.contains(if cfg!(windows) {
+            "vdr sync --backend colqwen"
+        } else {
+            "vdr sync --backend mlx"
+        }),
+        "got: {stderr}"
+    );
     assert_eq!(
         server.request_count(),
         after_sync,
