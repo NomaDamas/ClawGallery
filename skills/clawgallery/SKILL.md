@@ -130,6 +130,8 @@ clawgallery vdr status --json
 
 `clawgallery vdr sync` starts the packaged MLX `/embed` daemon automatically when no `--embedding-url` and no `CLAWGALLERY_VDR_EMBEDDING_URL` are configured, waits for it, lets the model runtime download/cache weights as needed, indexes active images, and terminates it before exit. Default search and `--mode embedding` also start a managed MLX server automatically for the query embedding when an index exists and no compatible endpoint is configured. Pass `--no-auto-start` to require an external server during sync.
 
+Windows dense VDR uses `--backend colqwen` (`vidore/colqwen2-v1.0`, 128 dims) with a PyTorch/colpali-engine interpreter. `mlx` and `jina-mlx` are Apple Silicon-only and fail on Windows with a pointer to ColQwen. Point `CLAWGALLERY_PYTHON` at that venv (`Scripts\python.exe`) for both `vdr sync` and later `search` commands. If Hugging Face downloads stall at `Fetching 2 files: 0%`, delete the incomplete `models--vidore--colqwen2-*` cache, upgrade `huggingface_hub`, and retry. Toggle `HF_HUB_DISABLE_XET` if `cdn-lfs.huggingface.co` or xet is blocked.
+
 The inference runtime is Rust-managed but MLX/Python-based because maintained ColQwen-family late-interaction model runtimes on macOS are not currently available as a low-risk pure Rust stack. Storage remains ClawGallery's embedded SQLite multi-vector store with Rust-side MaxSim scoring.
 
 Managed Jina v5 Omni retrieval path for Apple Silicon (`jinaai/jina-embeddings-v5-omni-small-retrieval-mlx`, dimensions `1024`):

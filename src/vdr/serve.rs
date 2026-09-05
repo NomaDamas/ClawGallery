@@ -1,4 +1,4 @@
-use super::backend::ServeBackend;
+use super::backend::{APPLE_ONLY_BACKEND_ERROR, ServeBackend};
 use anyhow::{Context, Result, bail};
 use serde_json::json;
 use std::{
@@ -12,6 +12,7 @@ use std::{
 
 const MLX_SERVER: &str = include_str!("../../scripts/mlx_embeddings_server.py");
 const JINA_MLX_SERVER: &str = include_str!("../../scripts/jina_mlx_embeddings_server.py");
+const COLQWEN_SERVER: &str = include_str!("../../scripts/colqwen2_server.py");
 const VSPLADE_SERVER: &str = include_str!("../../scripts/vsplade_server.py");
 const MANAGED_STARTUP_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
@@ -20,6 +21,7 @@ impl ServeBackend {
         match self {
             Self::Mlx => "mlx",
             Self::JinaMlx => "jina-mlx",
+            Self::Colqwen => "colqwen",
             Self::Vsplade => "vsplade",
         }
     }
@@ -28,6 +30,7 @@ impl ServeBackend {
         match self {
             Self::Mlx => MLX_SERVER,
             Self::JinaMlx => JINA_MLX_SERVER,
+            Self::Colqwen => COLQWEN_SERVER,
             Self::Vsplade => VSPLADE_SERVER,
         }
     }
@@ -230,23 +233,60 @@ fn default_python() -> PathBuf {
     PathBuf::from("python3")
 }
 
+fn fake_env_enabled(name: &str) -> bool {
+    env::var_os(name).is_some_and(|value| value == "1")
+}
+
 fn check_python_runtime(backend: ServeBackend, python: &PathBuf) -> Result<()> {
-    if backend != ServeBackend::Vsplade
-        || env::var_os("CLAWGALLERY_VDR_VSPLADE_FAKE").is_some_and(|value| value == "1")
+    let apple_only_fake = match backend {
+        ServeBackend::Mlx => fake_env_enabled("CLAWGALLERY_VDR_MLX_FAKE"),
+        ServeBackend::JinaMlx => fake_env_enabled("CLAWGALLERY_VDR_JINA_MLX_FAKE"),
+        ServeBackend::Colqwen | ServeBackend::Vsplade => false,
+    };
+    if cfg!(windows)
+        && matches!(backend, ServeBackend::Mlx | ServeBackend::JinaMlx)
+        && !apple_only_fake
     {
+        bail!("{APPLE_ONLY_BACKEND_ERROR}");
+    }
+    let (import, fake) = match backend {
+        ServeBackend::Colqwen => (
+            "import colpali_engine, torch, PIL",
+            fake_env_enabled("CLAWGALLERY_VDR_COLQWEN_FAKE"),
+        ),
+        ServeBackend::Vsplade => (
+            "import splade_mlx",
+            fake_env_enabled("CLAWGALLERY_VDR_VSPLADE_FAKE"),
+        ),
+        ServeBackend::Mlx | ServeBackend::JinaMlx => return Ok(()),
+    };
+    if fake {
         return Ok(());
     }
     let output = Command::new(python)
-        .args(["-c", "import splade_mlx"])
+        .args(["-c", import])
         .output()
         .with_context(|| {
             format!(
-                "failed to inspect V-SPLADE Python runtime {}",
+                "failed to inspect {} Python runtime {}",
+                backend.name(),
                 python.display()
             )
         })?;
     if output.status.success() {
         return Ok(());
+    }
+    if backend == ServeBackend::Colqwen {
+        bail!(
+            "ColQwen runtime is unavailable in {}: could not import colpali_engine, torch, and PIL. \
+Install the Windows PyTorch runtime in this environment, then retry with \
+--python {} or CLAWGALLERY_PYTHON={}. \
+Example: {} -m pip install colpali-engine torch transformers pillow huggingface_hub",
+            python.display(),
+            python.display(),
+            python.display(),
+            python.display()
+        );
     }
     bail!(
         "V-SPLADE runtime is unavailable in {}: could not import splade_mlx. \

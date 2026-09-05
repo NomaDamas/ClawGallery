@@ -5,6 +5,17 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Managed `--backend colqwen` dense VDR path for Windows CPU/CUDA via ColQwen2 and colpali-engine
+- Windows setup docs, incomplete Hugging Face cache diagnostics, and a Windows CI job
+
+### Fixed
+
+- `mlx` / `jina-mlx` on Windows now fail immediately with a pointer to `--backend colqwen` instead of importing `mlx_embeddings`
+
 ## [0.2.2] — 2026-08-27
 
 ### Added

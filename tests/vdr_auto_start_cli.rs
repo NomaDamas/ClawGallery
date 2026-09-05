@@ -6,7 +6,13 @@ use vdr_autosync_support::{
 };
 
 fn python_for_mlx_tests() -> String {
-    std::env::var("PYTHON").unwrap_or_else(|_| "python3".to_string())
+    std::env::var("PYTHON").unwrap_or_else(|_| {
+        if cfg!(windows) {
+            "python".to_string()
+        } else {
+            "python3".to_string()
+        }
+    })
 }
 
 #[test]
@@ -97,6 +103,58 @@ fn embedding_search_auto_starts_jina_backend_from_index_model() {
     ));
 
     // Then: the persisted model selects Jina MLX and returns the indexed image.
+    assert!(search.contains("dog.png"), "got: {search}");
+}
+
+#[test]
+fn vdr_plain_sync_colqwen_fake_auto_starts_with_backend_defaults() {
+    // Given: one indexed image and only the managed ColQwen backend selection.
+    let (_temp, config) = one_image_library();
+    let python = python_for_mlx_tests();
+
+    // When: sync runs without an external embedding server or explicit model dimensions.
+    let synced = assert_success(run_without_embedding_url(
+        &config,
+        &["vdr", "sync", "--backend", "colqwen", "--python", &python],
+        Some("CLAWGALLERY_VDR_COLQWEN_FAKE"),
+    ));
+    let status = assert_success(run_without_embedding_url(
+        &config,
+        &["vdr", "status", "--json"],
+        None,
+    ));
+
+    // Then: the managed ColQwen runtime starts and its exact index contract is persisted.
+    assert!(
+        synced.contains("starting managed colqwen embedding server at http://127.0.0.1:"),
+        "managed ColQwen server startup should be observable, got: {synced}"
+    );
+    assert!(synced.contains("indexed 1"), "got: {synced}");
+    let status: serde_json::Value = serde_json::from_str(&status).expect("status json");
+    assert_eq!(status["model"], "vidore/colqwen2-v1.0");
+    assert_eq!(status["dimensions"], 128);
+    assert_eq!(status["dense"]["available"], true);
+}
+
+#[test]
+fn embedding_search_auto_starts_colqwen_backend_from_index_model() {
+    // Given: an image index created by the managed ColQwen backend.
+    let (_temp, config) = one_image_library();
+    let python = python_for_mlx_tests();
+    assert_success(run_without_embedding_url(
+        &config,
+        &["vdr", "sync", "--backend", "colqwen", "--python", &python],
+        Some("CLAWGALLERY_VDR_COLQWEN_FAKE"),
+    ));
+
+    // When: embedding search runs without restating a backend or endpoint.
+    let search = assert_success(run_without_embedding_url(
+        &config,
+        &["search", "--mode", "embedding", "dog", "--json"],
+        Some("CLAWGALLERY_VDR_COLQWEN_FAKE"),
+    ));
+
+    // Then: the persisted model selects ColQwen and returns the indexed image.
     assert!(search.contains("dog.png"), "got: {search}");
 }
 
