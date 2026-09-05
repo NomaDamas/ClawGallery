@@ -12,8 +12,8 @@ use std::{collections::HashMap, env, path::PathBuf};
 mod backend;
 mod serve;
 
-pub(crate) use backend::ServeBackend;
 use backend::{DEFAULT_MANAGED_HOST, resolve_backend};
+pub(crate) use backend::{ServeBackend, default_dense_backend};
 pub(crate) use clawgallery_vdr::SimilarImageGroup;
 pub(crate) use clawgallery_vdr::{
     DEFAULT_DIMENSIONS, DEFAULT_MAX_RETRIES, DEFAULT_VDR_MODEL, latest_dense_index_config,
@@ -221,7 +221,7 @@ fn format_channel(name: &str, channel: &clawgallery_vdr::IndexChannelStatus) -> 
 fn encoding_for(backend: ServeBackend) -> VectorEncoding {
     match backend {
         ServeBackend::Vsplade => VectorEncoding::Sparse,
-        ServeBackend::Mlx | ServeBackend::JinaMlx => VectorEncoding::Dense,
+        ServeBackend::Mlx | ServeBackend::JinaMlx | ServeBackend::Colqwen => VectorEncoding::Dense,
     }
 }
 
@@ -238,7 +238,10 @@ pub(crate) fn embedding_search_hits(
         if skip_empty_index {
             return Ok(Vec::new());
         }
-        bail!("no dense VDR index; run `clawgallery vdr sync --backend mlx`");
+        bail!(
+            "no dense VDR index; run `clawgallery vdr sync --backend {}`",
+            if cfg!(windows) { "colqwen" } else { "mlx" }
+        );
     };
     let model = index.model;
     let dimensions = index.dimensions;

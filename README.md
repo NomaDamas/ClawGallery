@@ -222,6 +222,25 @@ clawgallery vdr status --json
 
 The default model is `qnguyen3/colqwen2.5-v0.2-mlx` (128 dimensions). The first run downloads and caches model weights. If Hugging Face downloads stall on macOS, retry with `HF_HUB_DISABLE_XET=1`.
 
+### Setup (Windows)
+
+MLX backends (`mlx`, `jina-mlx`) are Apple Silicon-only. On Windows, use the managed ColQwen2 PyTorch backend (`vidore/colqwen2-v1.0`, 128 dimensions):
+
+```powershell
+rustup default stable
+python -m venv "$env:LOCALAPPDATA\clawgallery\colqwen"
+& "$env:LOCALAPPDATA\clawgallery\colqwen\Scripts\python.exe" -m pip install -U pip huggingface_hub
+& "$env:LOCALAPPDATA\clawgallery\colqwen\Scripts\python.exe" -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+& "$env:LOCALAPPDATA\clawgallery\colqwen\Scripts\python.exe" -m pip install colpali-engine transformers pillow
+cargo install --path .
+
+$env:CLAWGALLERY_PYTHON = "$env:LOCALAPPDATA\clawgallery\colqwen\Scripts\python.exe"
+clawgallery vdr sync --backend colqwen
+clawgallery search --mode embedding "login error" --json
+```
+
+CUDA hosts can omit the CPU PyTorch index URL and use `--device cuda`. If a previous download stalled at `Fetching 2 files: 0%`, delete `%USERPROFILE%\.cache\huggingface\hub\models--vidore--colqwen2-*`, upgrade `huggingface_hub`, and retry. Some networks need `HF_HUB_DISABLE_XET=1`; others fail DNS for `cdn-lfs.huggingface.co` and need xet left enabled. `mlx` / `jina-mlx` fail immediately with a pointer to `--backend colqwen`.
+
 ### Jina v5 Omni retrieval on Apple Silicon
 
 ClawGallery also packages the MLX conversion of `jinaai/jina-embeddings-v5-omni-small-retrieval-mlx` (1024 dimensions). It requires Apple Silicon and loads the immutable Hugging Face revision `049ae923674456656be891ebb22849dd58124994`.
@@ -259,7 +278,7 @@ You can also set `CLAWGALLERY_VDR_EMBEDDING_URL` instead of passing `--embedding
 <details>
 <summary>External embedding backends (legacy ColQwen2 and SentenceTransformer Jina Omni)</summary>
 
-**Legacy ColQwen2** (`vidore/colqwen2-v1.0`, 128 dims):
+**Legacy ColQwen2** (`vidore/colqwen2-v1.0`, 128 dims). Prefer managed `--backend colqwen` above; this path is for an already-running external server:
 
 ```bash
 uv pip install colpali-engine torch pillow
@@ -387,8 +406,8 @@ clawgallery rename --undo [--last] [--file <path>] [--dry-run]
 clawgallery forget --file <path> [--delete]
 clawgallery dedup [--exact] [--similar] [--threshold <0..1>] [--json]
 clawgallery search [--mode keyword|embedding|lexical|hybrid] <query...> [--limit <n>] [--json] [--case-sensitive] [--no-fuzzy] [--embedding-url <url>]
-clawgallery vdr sync [--prune] [--embedding-url <url>] [--model <model>] [--dimensions <n>] [--max-retries <n>] [--auto-start|--no-auto-start] [--backend mlx|jina-mlx|vsplade] [--host <host>] [--port <port>] [--device auto|mps|cpu] [--python <path>] [--allow-remote]
-clawgallery vdr serve [--backend mlx|jina-mlx|vsplade] [--host <host>] [--port <port>] [--model <model>] [--dimensions <n>] [--device auto|mps|cpu] [--python <path>] [--allow-remote]
+clawgallery vdr sync [--prune] [--embedding-url <url>] [--model <model>] [--dimensions <n>] [--max-retries <n>] [--auto-start|--no-auto-start] [--backend mlx|jina-mlx|colqwen|vsplade] [--host <host>] [--port <port>] [--device auto|mps|cpu|cuda] [--python <path>] [--allow-remote]
+clawgallery vdr serve [--backend mlx|jina-mlx|colqwen|vsplade] [--host <host>] [--port <port>] [--model <model>] [--dimensions <n>] [--device auto|mps|cpu|cuda] [--python <path>] [--allow-remote]
 clawgallery vdr status [--json]
 clawgallery daemon install [--interval <seconds>] [--caption] [--sync] [--path <path>] [--folder <id>]
 clawgallery daemon start|stop|status|uninstall|logs
@@ -397,7 +416,8 @@ clawgallery skill path|print
 ```
 
 `jina-mlx` supports `--device auto|mps`; `cpu` is available only with the
-default `mlx` backend.
+default `mlx` backend. `colqwen` supports `--device auto|cpu|cuda` and is the
+Windows dense default.
 
 ---
 

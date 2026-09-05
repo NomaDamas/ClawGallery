@@ -19,7 +19,14 @@ impl JinaServer {
             .port();
         let script =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/jina_mlx_embeddings_server.py");
-        let mut child = Command::new("python3")
+        let python = std::env::var("PYTHON").unwrap_or_else(|_| {
+            if cfg!(windows) {
+                "python".to_string()
+            } else {
+                "python3".to_string()
+            }
+        });
+        let mut child = Command::new(python)
             .env("CLAWGALLERY_VDR_JINA_MLX_FAKE", "1")
             .arg(script)
             .args(["--port", &port.to_string()])
