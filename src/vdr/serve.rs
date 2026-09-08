@@ -349,7 +349,7 @@ mod tests {
     use super::{default_python, virtual_env_python};
     use std::fs;
     #[cfg(windows)]
-    use std::{env, path::PathBuf};
+    use std::path::PathBuf;
 
     #[test]
     fn virtual_env_python_uses_platform_layout() {
