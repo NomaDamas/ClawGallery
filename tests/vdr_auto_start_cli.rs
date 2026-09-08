@@ -6,7 +6,13 @@ use vdr_autosync_support::{
 };
 
 fn python_for_mlx_tests() -> String {
-    std::env::var("PYTHON").unwrap_or_else(|_| "python3".to_string())
+    std::env::var("PYTHON").unwrap_or_else(|_| {
+        if cfg!(windows) {
+            "python".to_string()
+        } else {
+            "python3".to_string()
+        }
+    })
 }
 
 #[test]
