@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::ValueEnum;
 
 pub(super) const DEFAULT_MLX_MODEL: &str = "qnguyen3/colqwen2.5-v0.2-mlx";
@@ -86,8 +86,8 @@ pub(super) fn resolve_backend(
 #[cfg(test)]
 mod tests {
     use super::{
-        default_dense_backend, resolve_backend, ServeBackend, APPLE_ONLY_BACKEND_ERROR,
-        DEFAULT_COLQWEN_DIMENSIONS, DEFAULT_COLQWEN_MODEL,
+        APPLE_ONLY_BACKEND_ERROR, DEFAULT_COLQWEN_DIMENSIONS, DEFAULT_COLQWEN_MODEL, ServeBackend,
+        default_dense_backend, resolve_backend,
     };
 
     #[test]

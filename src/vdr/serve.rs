@@ -344,8 +344,12 @@ fn is_loopback_host(host: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    use super::{ServeBackend, check_python_runtime};
     use super::{default_python, virtual_env_python};
     use std::fs;
+    #[cfg(windows)]
+    use std::{env, path::PathBuf};
 
     #[test]
     fn virtual_env_python_uses_platform_layout() {
@@ -366,6 +370,25 @@ mod tests {
         assert_eq!(
             default_python().file_name().expect("python filename"),
             if cfg!(windows) { "python" } else { "python3" }
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn colqwen_runtime_check_does_not_require_vsplade_repo() {
+        env::remove_var("CLAWGALLERY_VSPLADE_REPO");
+        env::remove_var("CLAWGALLERY_VDR_COLQWEN_FAKE");
+        let python = PathBuf::from("python");
+        let err = check_python_runtime(ServeBackend::Colqwen, &python)
+            .expect_err("colqwen check should fail on missing colpali imports, not vsplade repo");
+        let msg = format!("{err:#}");
+        assert!(
+            !msg.contains("CLAWGALLERY_VSPLADE_REPO"),
+            "colqwen must not demand V-SPLADE_REPO, got: {msg}"
+        );
+        assert!(
+            msg.contains("ColQwen") || msg.contains("colpali"),
+            "expected ColQwen import diagnostic, got: {msg}"
         );
     }
 }
