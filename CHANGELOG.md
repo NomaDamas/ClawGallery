@@ -7,14 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] — 2026-09-08
+
 ### Added
 
+- Native Windows V-SPLADE backend using the packaged PyTorch server and `naver/v-splade-efficient` (set `CLAWGALLERY_VSPLADE_REPO` to a [naver/v-splade](https://github.com/naver/v-splade) checkout)
 - Managed `--backend colqwen` dense VDR path for Windows CPU/CUDA via ColQwen2 and colpali-engine
 - Windows setup docs, incomplete Hugging Face cache diagnostics, and a Windows CI job
 
 ### Fixed
 
+- Windows V-SPLADE snapshot-downloads Hub repo ids before the upstream helper wraps them in `Path()`, which turned `naver/v-splade-efficient` into a rejected backslash path
 - `mlx` / `jina-mlx` on Windows now fail immediately with a pointer to `--backend colqwen` instead of importing `mlx_embeddings`
+- Combined Windows V-SPLADE + ColQwen runtime checks no longer require `CLAWGALLERY_VSPLADE_REPO` for ColQwen
 
 ## [0.2.2] — 2026-08-27
 
@@ -48,6 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `caption --file` binds `source_sha256` to the live file bytes and pre-bootstrap captions keep working after later bootstrap
 - VDR consumes bootstrap state instead of rehashing the library, streams hashes, and replaces vectors atomically
 
+[0.2.3]: https://github.com/NomaDamas/ClawGallery/releases/tag/v0.2.3
 [0.1.2]: https://github.com/NomaDamas/ClawGallery/releases/tag/v0.1.2
 
 ## [0.1.0] — 2026-07-03
