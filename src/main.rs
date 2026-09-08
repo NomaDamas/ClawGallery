@@ -3020,6 +3020,7 @@ mod tests {
         assert_eq!(mime_for_path(Path::new("photo.heif")), "image/heif");
     }
 
+    #[cfg(unix)]
     #[test]
     fn caption_image_payload_converts_heic_with_configured_converter() {
         use std::os::unix::fs::PermissionsExt;
