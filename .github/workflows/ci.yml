@@ -36,6 +36,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Verify Windows build and tests
+        shell: bash
         run: |
           cargo fmt --all -- --check
           cargo test --workspace --all-features
