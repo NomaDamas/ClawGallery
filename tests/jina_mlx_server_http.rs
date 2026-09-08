@@ -1,3 +1,5 @@
+#![cfg(not(windows))]
+
 use std::{
     io::{BufRead, BufReader, Read, Write},
     net::{Shutdown, TcpListener, TcpStream},
