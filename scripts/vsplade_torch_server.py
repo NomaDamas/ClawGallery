@@ -45,6 +45,24 @@ def validate_bind_host(args: argparse.Namespace) -> None:
     )
 
 
+def resolve_pretrained_source(model_name: str, downloader=None) -> str:
+    """Return a local directory the upstream helper can wrap in Path().
+
+    VSPLADEInference.from_pretrained does ``hf_dir = Path(hf_dir)``. On Windows
+    that turns a Hub repo id such as ``naver/v-splade-efficient`` into
+    ``naver\\v-splade-efficient``, which huggingface_hub rejects. Snapshot the
+    repo first so the helper always receives a real directory.
+    """
+    candidate = Path(model_name)
+    if candidate.exists():
+        return str(candidate.resolve())
+    if downloader is None:
+        from huggingface_hub import snapshot_download  # type: ignore[import-not-found]
+
+        downloader = snapshot_download
+    return downloader(repo_id=model_name)
+
+
 def load_encoder(model_name: str, device_name: str):
     repo = os.environ.get("CLAWGALLERY_VSPLADE_REPO")
     if not repo:
@@ -69,7 +87,8 @@ def load_encoder(model_name: str, device_name: str):
     import torch  # type: ignore[import-not-found]
 
     device = "cuda" if device_name in {"auto", "cuda"} and torch.cuda.is_available() else "cpu"
-    return VSPLADEInference.from_pretrained(model_name, device=device, dtype=torch.float32)
+    source = resolve_pretrained_source(model_name)
+    return VSPLADEInference.from_pretrained(source, device=device, dtype=torch.float32)
 
 
 def to_sparse(vector, dimensions: int) -> dict[str, list[float] | list[int]]:

@@ -40,3 +40,5 @@ jobs:
           cargo fmt --all -- --check
           cargo test --workspace --all-features
           cargo build --workspace --all-features
+          python -m py_compile scripts/vsplade_torch_server.py scripts/vsplade_server.py
+          python -m unittest tests.vsplade_torch_resolve
