@@ -376,8 +376,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn colqwen_runtime_check_does_not_require_vsplade_repo() {
-        env::remove_var("CLAWGALLERY_VSPLADE_REPO");
-        env::remove_var("CLAWGALLERY_VDR_COLQWEN_FAKE");
         let python = PathBuf::from("python");
         let err = check_python_runtime(ServeBackend::Colqwen, &python)
             .expect_err("colqwen check should fail on missing colpali imports, not vsplade repo");
