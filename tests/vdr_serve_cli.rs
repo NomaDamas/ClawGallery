@@ -61,6 +61,24 @@ fn vdr_serve_help_lists_vsplade_backend() {
 }
 
 #[test]
+fn vdr_serve_help_lists_colqwen_backend() {
+    // Given: the installed ClawGallery binary.
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    // When: the managed VDR server help is requested.
+    let output = Command::new(clawgallery_bin())
+        .env("CLAWGALLERY_CONFIG_DIR", temp.path().join("state"))
+        .args(["vdr", "serve", "--help"])
+        .output()
+        .expect("clawgallery command should run");
+
+    // Then: the Windows dense ColQwen backend is discoverable.
+    assert!(output.status.success(), "serve help should succeed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("colqwen"), "got: {stdout}");
+}
+
+#[test]
 fn vdr_serve_jina_mlx_rejects_incompatible_dimensions() {
     // Given: the Jina MLX backend with a ColQwen-sized vector request.
     let temp = tempfile::tempdir().expect("tempdir");
@@ -148,5 +166,75 @@ fn vdr_serve_mlx_accepts_allow_remote_flag_for_python_launcher() {
         "serve help with --allow-remote should succeed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn vdr_serve_colqwen_rejects_remote_bind_without_allow_remote() {
+    // Given: a request to expose the unauthenticated ColQwen embedding server.
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    // When: the colqwen backend is started on a non-loopback host without an opt-in.
+    let output = Command::new(clawgallery_bin())
+        .env("CLAWGALLERY_CONFIG_DIR", temp.path().join("state"))
+        .env("CLAWGALLERY_VDR_COLQWEN_FAKE", "1")
+        .args([
+            "vdr",
+            "serve",
+            "--backend",
+            "colqwen",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "8878",
+        ])
+        .output()
+        .expect("clawgallery command should run");
+
+    // Then: the launcher refuses the unsafe bind before starting the daemon.
+    assert!(
+        !output.status.success(),
+        "remote bind should fail\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("refusing to bind") && stderr.contains("non-loopback"),
+        "expected non-loopback refusal, got: {stderr}"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn vdr_serve_mlx_on_windows_points_at_colqwen() {
+    // Given: the Windows CLI with mlx selected and no MLX fake runtime.
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    // When: a user asks the managed mlx backend to start.
+    let output = Command::new(clawgallery_bin())
+        .env("CLAWGALLERY_CONFIG_DIR", temp.path().join("state"))
+        .env_remove("CLAWGALLERY_VDR_MLX_FAKE")
+        .args([
+            "vdr",
+            "serve",
+            "--backend",
+            "mlx",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "0",
+        ])
+        .output()
+        .expect("clawgallery command should run");
+
+    // Then: Windows fails before importing mlx_embeddings and names --backend colqwen.
+    assert!(!output.status.success(), "mlx on Windows should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("colqwen"), "got: {stderr}");
+    assert!(stderr.contains("Apple Silicon"), "got: {stderr}");
+    assert!(
+        !stderr.contains("mlx_embeddings"),
+        "should not reach the Apple-only import, got: {stderr}"
     );
 }
