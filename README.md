@@ -184,7 +184,7 @@ the native PyTorch V-SPLADE runtime instead, so it does not require Apple MLX:
 
 ```powershell
 git clone https://github.com/naver/v-splade.git $env:USERPROFILE\v-splade
-python -m pip install torch torchvision transformers pillow safetensors accelerate huggingface_hub
+python -m pip install torch torchvision transformers pillow safetensors accelerate huggingface_hub "colpali-engine>=0.3.18"
 $env:CLAWGALLERY_VSPLADE_REPO = "$env:USERPROFILE\v-splade"
 clawgallery vdr sync --backend vsplade
 ```
