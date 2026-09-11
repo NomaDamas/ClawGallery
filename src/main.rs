@@ -15,7 +15,7 @@ use std::{
     fs::{self, File},
     io,
     path::{Path, PathBuf},
-    process::{Command as ProcessCommand, ExitCode},
+    process::{Command as ProcessCommand, ExitCode, Stdio},
     thread,
     time::Duration,
 };
@@ -1215,41 +1215,67 @@ fn cmd_daemon(paths: &AppPaths, args: DaemonArgs) -> Result<()> {
 }
 
 fn cmd_daemon_install(paths: &AppPaths, args: DaemonPollArgs) -> Result<()> {
-    let service_file = daemon_service_file()?;
-    if let Some(parent) = service_file.parent() {
-        fs::create_dir_all(parent)?;
-    }
     let exe = env::current_exe().context("failed to resolve current executable")?;
     let arguments = daemon_run_arguments(&exe, &args);
     let environment = daemon_environment(paths);
-    let label = daemon_label();
-    let content = if service_file.extension().and_then(OsStr::to_str) == Some("service") {
-        systemd_service(paths, &arguments, &environment)
-    } else {
-        launchd_plist(paths, &label, &arguments, &environment)
-    };
-    fs::write(&service_file, content)
-        .with_context(|| format!("failed to write {}", service_file.display()))?;
-    println!("installed daemon service {}", service_file.display());
+    match daemon_service()? {
+        DaemonService::File(service_file) => {
+            if let Some(parent) = service_file.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let label = daemon_label();
+            let content = if service_file.extension().and_then(OsStr::to_str) == Some("service") {
+                systemd_service(paths, &arguments, &environment)
+            } else {
+                launchd_plist(paths, &label, &arguments, &environment)
+            };
+            fs::write(&service_file, content)
+                .with_context(|| format!("failed to write {}", service_file.display()))?;
+            println!("installed daemon service {}", service_file.display());
+        }
+        DaemonService::WindowsTask(name) => {
+            let wrapper = daemon_windows_wrapper_path(paths);
+            if let Some(parent) = wrapper.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(
+                &wrapper,
+                daemon_windows_wrapper(&daemon_log_path(paths), &arguments, &environment),
+            )
+            .with_context(|| format!("failed to write {}", wrapper.display()))?;
+            let create_args = daemon_windows_task_create_args(&name, &wrapper);
+            let create_args = create_args.iter().map(String::as_str).collect::<Vec<_>>();
+            run_status_command("schtasks", &create_args)
+                .context("failed to register daemon scheduled task")?;
+            println!("installed daemon service {name} (Task Scheduler)");
+        }
+    }
     println!("logs: {}", daemon_log_path(paths).display());
     Ok(())
 }
 
 fn cmd_daemon_start(paths: &AppPaths) -> Result<()> {
-    let service_file = daemon_service_file()?;
-    if env::var_os(DAEMON_DIR_ENV).is_some() {
-        println!(
-            "start skipped for managed test service {}",
-            service_file.display()
-        );
-        return Ok(());
-    }
-    if service_file.extension().and_then(OsStr::to_str) == Some("service") {
-        let service_name = daemon_systemd_unit_name(&service_file)?;
-        run_status_command("systemctl", &["--user", "start", service_name.as_str()])?;
-    } else {
-        let service = service_file.to_string_lossy().to_string();
-        run_status_command("launchctl", &["load", service.as_str()])?;
+    match daemon_service()? {
+        DaemonService::File(service_file) => {
+            if env::var_os(DAEMON_DIR_ENV).is_some() {
+                println!(
+                    "start skipped for managed test service {}",
+                    service_file.display()
+                );
+                return Ok(());
+            }
+            if service_file.extension().and_then(OsStr::to_str) == Some("service") {
+                let service_name = daemon_systemd_unit_name(&service_file)?;
+                run_status_command("systemctl", &["--user", "start", service_name.as_str()])?;
+            } else {
+                let service = service_file.to_string_lossy().to_string();
+                run_status_command("launchctl", &["load", service.as_str()])?;
+            }
+        }
+        DaemonService::WindowsTask(name) => {
+            run_status_command("schtasks", &["/Run", "/TN", name.as_str()])
+                .context("failed to start daemon scheduled task")?;
+        }
     }
     println!("started daemon service");
     println!("logs: {}", daemon_log_path(paths).display());
@@ -1257,32 +1283,53 @@ fn cmd_daemon_start(paths: &AppPaths) -> Result<()> {
 }
 
 fn cmd_daemon_stop(_paths: &AppPaths) -> Result<()> {
-    let service_file = daemon_service_file()?;
-    if env::var_os(DAEMON_DIR_ENV).is_some() {
-        println!(
-            "stop skipped for managed test service {}",
-            service_file.display()
-        );
-        return Ok(());
-    }
-    if service_file.extension().and_then(OsStr::to_str) == Some("service") {
-        let service_name = daemon_systemd_unit_name(&service_file)?;
-        run_status_command("systemctl", &["--user", "stop", service_name.as_str()])?;
-    } else {
-        let service = service_file.to_string_lossy().to_string();
-        run_status_command("launchctl", &["unload", service.as_str()])?;
+    match daemon_service()? {
+        DaemonService::File(service_file) => {
+            if env::var_os(DAEMON_DIR_ENV).is_some() {
+                println!(
+                    "stop skipped for managed test service {}",
+                    service_file.display()
+                );
+                return Ok(());
+            }
+            if service_file.extension().and_then(OsStr::to_str) == Some("service") {
+                let service_name = daemon_systemd_unit_name(&service_file)?;
+                run_status_command("systemctl", &["--user", "stop", service_name.as_str()])?;
+            } else {
+                let service = service_file.to_string_lossy().to_string();
+                run_status_command("launchctl", &["unload", service.as_str()])?;
+            }
+        }
+        DaemonService::WindowsTask(name) => {
+            run_status_command("schtasks", &["/End", "/TN", name.as_str()])
+                .context("failed to stop daemon scheduled task")?;
+        }
     }
     println!("stopped daemon service");
     Ok(())
 }
 
 fn cmd_daemon_status(paths: &AppPaths) -> Result<()> {
-    let service_file = daemon_service_file()?;
-    println!(
-        "installed: {}",
-        if service_file.exists() { "yes" } else { "no" }
-    );
-    println!("service_file: {}", service_file.display());
+    match daemon_service()? {
+        DaemonService::File(service_file) => {
+            println!(
+                "installed: {}",
+                if service_file.exists() { "yes" } else { "no" }
+            );
+            println!("service_file: {}", service_file.display());
+        }
+        DaemonService::WindowsTask(name) => {
+            println!(
+                "installed: {}",
+                if windows_task_exists(&name) {
+                    "yes"
+                } else {
+                    "no"
+                }
+            );
+            println!("task: {name} (Task Scheduler)");
+        }
+    }
     println!("logs: {}", daemon_log_path(paths).display());
     match read_daemon_state(paths)? {
         Some(state) => {
@@ -1298,13 +1345,26 @@ fn cmd_daemon_status(paths: &AppPaths) -> Result<()> {
 }
 
 fn cmd_daemon_uninstall(paths: &AppPaths) -> Result<()> {
-    let service_file = daemon_service_file()?;
-    if service_file.exists() {
-        fs::remove_file(&service_file)
-            .with_context(|| format!("failed to remove {}", service_file.display()))?;
-        println!("uninstalled daemon service {}", service_file.display());
-    } else {
-        println!("daemon service was not installed");
+    match daemon_service()? {
+        DaemonService::File(service_file) => {
+            if service_file.exists() {
+                fs::remove_file(&service_file)
+                    .with_context(|| format!("failed to remove {}", service_file.display()))?;
+                println!("uninstalled daemon service {}", service_file.display());
+            } else {
+                println!("daemon service was not installed");
+            }
+        }
+        DaemonService::WindowsTask(name) => {
+            if windows_task_exists(&name) {
+                run_status_command("schtasks", &["/Delete", "/F", "/TN", name.as_str()])
+                    .context("failed to delete daemon scheduled task")?;
+                println!("uninstalled daemon service {name}");
+            } else {
+                println!("daemon service was not installed");
+            }
+            let _ = fs::remove_file(daemon_windows_wrapper_path(paths));
+        }
     }
     let _ = fs::remove_file(daemon_pid_path(paths));
     Ok(())
@@ -1421,20 +1481,88 @@ fn systemd_service(
     )
 }
 
-fn daemon_service_file() -> Result<PathBuf> {
+enum DaemonService {
+    File(PathBuf),
+    WindowsTask(String),
+}
+
+fn daemon_service() -> Result<DaemonService> {
     if let Some(dir) = env::var_os(DAEMON_DIR_ENV) {
-        return Ok(PathBuf::from(dir).join(format!("{}.plist", daemon_label())));
+        return Ok(DaemonService::File(
+            PathBuf::from(dir).join(format!("{}.plist", daemon_label())),
+        ));
+    }
+    if cfg!(target_os = "windows") {
+        return Ok(DaemonService::WindowsTask(daemon_label()));
     }
     if cfg!(target_os = "linux") {
         let dir = dirs::config_dir()
             .ok_or_else(|| anyhow!("could not resolve config directory"))?
             .join("systemd/user");
-        return Ok(dir.join(format!("{}.service", daemon_label())));
+        return Ok(DaemonService::File(
+            dir.join(format!("{}.service", daemon_label())),
+        ));
     }
     let dir = dirs::home_dir()
         .ok_or_else(|| anyhow!("could not resolve home directory"))?
         .join("Library/LaunchAgents");
-    Ok(dir.join(format!("{}.plist", daemon_label())))
+    Ok(DaemonService::File(
+        dir.join(format!("{}.plist", daemon_label())),
+    ))
+}
+
+fn daemon_windows_wrapper_path(paths: &AppPaths) -> PathBuf {
+    paths.root.join("clawgallery-daemon.cmd")
+}
+
+fn daemon_windows_wrapper(
+    log_path: &Path,
+    arguments: &[String],
+    environment: &[(String, String)],
+) -> String {
+    let mut lines = vec!["@echo off".to_string()];
+    for (key, value) in environment {
+        lines.push(format!("set \"{}={}\"", key, cmd_escape(value)));
+    }
+    let command = arguments
+        .iter()
+        .map(|value| format!("\"{}\"", cmd_escape(value)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    lines.push(format!(
+        "{command} >> \"{}\" 2>&1",
+        cmd_escape(&log_path.display().to_string())
+    ));
+    lines.push(String::new());
+    lines.join("\r\n")
+}
+
+fn daemon_windows_task_create_args(name: &str, wrapper: &Path) -> Vec<String> {
+    vec![
+        "/Create".to_string(),
+        "/F".to_string(),
+        "/SC".to_string(),
+        "ONLOGON".to_string(),
+        "/TN".to_string(),
+        name.to_string(),
+        "/TR".to_string(),
+        format!("\"{}\"", wrapper.display()),
+    ]
+}
+
+fn windows_task_exists(name: &str) -> bool {
+    ProcessCommand::new("schtasks")
+        .args(["/Query", "/TN", name])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn cmd_escape(value: &str) -> String {
+    value.replace('%', "%%")
 }
 
 fn daemon_label() -> String {
@@ -3004,6 +3132,65 @@ fn mask_api_keys(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_wrapper_sets_environment_and_redirects_log() {
+        let wrapper = daemon_windows_wrapper(
+            Path::new("C:\\state\\daemon.log"),
+            &[
+                "C:\\bin\\clawgallery.exe".to_string(),
+                "daemon".to_string(),
+                "run".to_string(),
+                "--interval".to_string(),
+                "5".to_string(),
+            ],
+            &[
+                (
+                    "CLAWGALLERY_CONFIG_DIR".to_string(),
+                    "C:\\state".to_string(),
+                ),
+                ("OPENAI_API_KEY".to_string(), "sk-test".to_string()),
+            ],
+        );
+        assert!(wrapper.starts_with("@echo off"));
+        assert!(wrapper.contains("set \"CLAWGALLERY_CONFIG_DIR=C:\\state\""));
+        assert!(wrapper.contains("set \"OPENAI_API_KEY=sk-test\""));
+        assert!(
+            wrapper.contains("\"C:\\bin\\clawgallery.exe\" \"daemon\" \"run\" \"--interval\" \"5\" >> \"C:\\state\\daemon.log\" 2>&1"),
+            "got: {wrapper}"
+        );
+    }
+
+    #[test]
+    fn windows_wrapper_escapes_percent_for_batch_files() {
+        let wrapper = daemon_windows_wrapper(
+            Path::new("C:\\state\\daemon.log"),
+            &["clawgallery".to_string()],
+            &[("KEY".to_string(), "50%".to_string())],
+        );
+        assert!(wrapper.contains("set \"KEY=50%%\""), "got: {wrapper}");
+    }
+
+    #[test]
+    fn windows_task_create_args_register_onlogon_task() {
+        let args = daemon_windows_task_create_args(
+            "com.clawgallery.poll",
+            Path::new("C:\\state\\clawgallery-daemon.cmd"),
+        );
+        assert_eq!(
+            args,
+            vec![
+                "/Create",
+                "/F",
+                "/SC",
+                "ONLOGON",
+                "/TN",
+                "com.clawgallery.poll",
+                "/TR",
+                "\"C:\\state\\clawgallery-daemon.cmd\""
+            ]
+        );
+    }
 
     #[test]
     fn detects_supported_images_case_insensitively() {
