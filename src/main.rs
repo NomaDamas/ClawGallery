@@ -1057,10 +1057,16 @@ fn undo_rename_records(paths: &AppPaths, args: &RenameArgs) -> Result<Vec<Rename
 
 fn cmd_forget(paths: &AppPaths, args: ForgetArgs) -> Result<()> {
     paths.ensure()?;
-    let requested = fs::canonicalize(&args.file).unwrap_or_else(|_| args.file.clone());
+    // Normalize both sides before comparing so the path form the user typed
+    // matches records stored in any canonical form (issue #22: Windows
+    // \\?\ extended-prefix records must match the plain typed path).
+    let requested = dunce::canonicalize(&args.file).unwrap_or_else(|_| args.file.clone());
     let image = latest_images(paths)?
         .into_iter()
-        .find(|image| image.path == requested)
+        .find(|image| {
+            dunce::simplified(&image.path) == dunce::simplified(&requested)
+                || image.path == args.file
+        })
         .ok_or_else(|| anyhow!("no active image matched {}", args.file.display()))?;
 
     let deleted = if args.delete && image.path.exists() {

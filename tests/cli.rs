@@ -1195,6 +1195,29 @@ fn forget_delete_removes_disk_file_and_untracks_image() {
 }
 
 #[test]
+fn forget_file_matches_the_path_form_used_at_index_time() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).unwrap();
+    let image = images.join("screen.png");
+    fs::write(&image, b"not really png").unwrap();
+    assert_success(run(&config, &["init"]));
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", images.to_str().unwrap()],
+    ));
+
+    // Forget with the exact string the user typed, never a pre-canonicalized
+    // form (issue #22 comment: forget --file failed to match the stored
+    // Windows \\?\ extended path with the plain typed path).
+    let forgotten = assert_success(run(&config, &["forget", "--file", image.to_str().unwrap()]));
+    assert!(forgotten.contains("forgot 1 image"), "got: {forgotten}");
+    let status = assert_success(run(&config, &["status"]));
+    assert!(status.contains("images: 0"), "got: {status}");
+}
+
+#[test]
 fn forget_missing_path_reports_clear_error() {
     let temp = tempfile::tempdir().unwrap();
     let config = temp.path().join("state");
