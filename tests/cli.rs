@@ -446,6 +446,83 @@ fn daemon_status_reports_missing_service_cleanly() {
     assert!(status.contains("installed: no"), "got: {status}");
 }
 
+#[cfg(windows)]
+fn run_with_str_env(config: &Path, args: &[&str], envs: &[(&str, &str)]) -> Output {
+    let mut command = Command::new(bin());
+    command
+        .env("CLAWGALLERY_CONFIG_DIR", config)
+        .env_remove("OPENAI_API_KEY")
+        .env("CODEX_HOME", config.join("codex-home"))
+        .args(args);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    command.output().expect("clawgallery command should run")
+}
+
+#[cfg(windows)]
+struct ScheduledTaskGuard(String);
+
+#[cfg(windows)]
+impl Drop for ScheduledTaskGuard {
+    fn drop(&mut self) {
+        let _ = Command::new("schtasks")
+            .args(["/Delete", "/F", "/TN", &self.0])
+            .output();
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn daemon_install_status_and_uninstall_use_windows_task_scheduler() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    let label = format!("ClawGalleryTestDaemon{}", std::process::id());
+    let _guard = ScheduledTaskGuard(label.clone());
+    let envs: Vec<(&str, &str)> = vec![("CLAWGALLERY_DAEMON_LABEL", label.as_str())];
+    assert_success(run(&config, &["init"]));
+
+    let installed = assert_success(run_with_str_env(
+        &config,
+        &["daemon", "install", "--interval", "5"],
+        &envs,
+    ));
+    assert!(installed.contains("Task Scheduler"), "got: {installed}");
+
+    let query = Command::new("schtasks")
+        .args(["/Query", "/TN", &label])
+        .output()
+        .unwrap();
+    assert!(query.status.success(), "scheduled task should exist");
+
+    let plist = PathBuf::from(env::var("USERPROFILE").unwrap())
+        .join("Library")
+        .join("LaunchAgents")
+        .join(format!("{label}.plist"));
+    assert!(
+        !plist.exists(),
+        "no launchd plist should be created on Windows"
+    );
+
+    let status = assert_success(run_with_str_env(&config, &["daemon", "status"], &envs));
+    assert!(status.contains("installed: yes"), "got: {status}");
+    assert!(status.contains(&label), "got: {status}");
+
+    let uninstalled = assert_success(run_with_str_env(&config, &["daemon", "uninstall"], &envs));
+    assert!(
+        uninstalled.contains("uninstalled daemon service"),
+        "got: {uninstalled}"
+    );
+    let query = Command::new("schtasks")
+        .args(["/Query", "/TN", &label])
+        .output()
+        .unwrap();
+    assert!(
+        !query.status.success(),
+        "scheduled task should be removed after uninstall"
+    );
+}
+
 #[test]
 fn caption_dry_run_output_is_terse() {
     let temp = tempfile::tempdir().unwrap();
