@@ -88,11 +88,18 @@ fn colqwen_server_embeds_image_text_and_caption_inputs() {
     let image = temp.path().join("dog.png");
     fs::write(&image, b"png-bytes").expect("image");
 
-    // When: image, text, and caption inputs are embedded together.
-    let body = format!(
-        r#"{{"model":"vidore/colqwen2-v1.0","dimensions":128,"inputs":[{{"kind":"image","role":"document","value":"{}"}},{{"kind":"text","role":"query","value":"dog"}},{{"kind":"caption","role":"document","value":"a puppy"}}]}}"#,
-        image.display()
-    );
+    // When: image, text, and caption inputs are embedded together. The body
+    // is built with serde_json so Windows paths with backslashes stay valid JSON.
+    let body = serde_json::json!({
+        "model": "vidore/colqwen2-v1.0",
+        "dimensions": 128,
+        "inputs": [
+            {"kind": "image", "role": "document", "value": image.display().to_string()},
+            {"kind": "text", "role": "query", "value": "dog"},
+            {"kind": "caption", "role": "document", "value": "a puppy"}
+        ]
+    })
+    .to_string();
     let response = server.send("application/json", None, &body);
 
     // Then: one 128-d multi-vector is returned per input.
