@@ -517,9 +517,20 @@ fn cmd_folder_add(paths: &AppPaths, args: FolderAddArgs) -> Result<()> {
 
 fn cmd_folder_remove(paths: &AppPaths, args: FolderRemoveArgs) -> Result<()> {
     paths.ensure()?;
+    // Normalize the lookup the same way folder add normalizes what it stores,
+    // so the path form the user typed (no \\?\ prefix, symlinks unresolved)
+    // matches the canonical record (issue #22). dunce::simplified also lets a
+    // plain path match records stored with the prefix by an older release.
+    let requested = dunce::canonicalize(&args.id_or_path).ok();
     let mut matched = false;
     for folder in active_folders(paths)? {
-        if folder.id == args.id_or_path || folder.path.to_string_lossy() == args.id_or_path {
+        let path_matches = requested.as_ref().is_some_and(|requested_path| {
+            dunce::simplified(requested_path) == dunce::simplified(&folder.path)
+        });
+        if folder.id == args.id_or_path
+            || folder.path.to_string_lossy() == args.id_or_path
+            || path_matches
+        {
             let mut removed = folder.clone();
             removed.active = false;
             removed.removed_at = Some(Utc::now());
@@ -2392,8 +2403,10 @@ fn candidate_image_paths(paths: &AppPaths, args: &IngestArgs) -> Result<Vec<Path
 }
 
 fn canonicalize_existing_dir(path: &Path) -> Result<PathBuf> {
+    // dunce strips the Windows \\?\ extended-length prefix that
+    // fs::canonicalize returns, so stored paths match the form users type.
     let canonical =
-        fs::canonicalize(path).with_context(|| format!("{} does not exist", path.display()))?;
+        dunce::canonicalize(path).with_context(|| format!("{} does not exist", path.display()))?;
     if !canonical.is_dir() {
         bail!("{} is not a directory", canonical.display());
     }
