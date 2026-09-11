@@ -78,6 +78,28 @@ fn folder_bootstrap_search_and_remove_flow() {
     assert!(listed_after.trim().is_empty());
 }
 
+#[test]
+fn folder_remove_matches_the_path_form_used_for_add() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).unwrap();
+    assert_success(run(&config, &["init"]));
+
+    // Remove with the exact string the user typed for `folder add`, never a
+    // pre-canonicalized form (issue #22: on Windows the stored path carried a
+    // \\?\ prefix while the user types the plain path; on macOS tempdir paths
+    // exercise the same mismatch through /var vs /private/var).
+    let typed = images.to_str().unwrap();
+    assert_success(run(&config, &["folder", "add", typed]));
+    assert_success(run(&config, &["folder", "remove", typed]));
+    let listed = assert_success(run(&config, &["folder", "list"]));
+    assert!(
+        listed.trim().is_empty(),
+        "folder should be removed: {listed}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn bootstrap_unchanged_metadata_does_not_read_image_again() {
@@ -1170,6 +1192,29 @@ fn forget_delete_removes_disk_file_and_untracks_image() {
 
     let status = assert_success(run(&config, &["status"]));
     assert!(status.contains("images: 0"));
+}
+
+#[test]
+fn forget_file_matches_the_path_form_used_at_index_time() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    let images = temp.path().join("images");
+    fs::create_dir_all(&images).unwrap();
+    let image = images.join("screen.png");
+    fs::write(&image, b"not really png").unwrap();
+    assert_success(run(&config, &["init"]));
+    assert_success(run(
+        &config,
+        &["bootstrap", "--path", images.to_str().unwrap()],
+    ));
+
+    // Forget with the exact string the user typed, never a pre-canonicalized
+    // form (issue #22 comment: forget --file failed to match the stored
+    // Windows \\?\ extended path with the plain typed path).
+    let forgotten = assert_success(run(&config, &["forget", "--file", image.to_str().unwrap()]));
+    assert!(forgotten.contains("forgot 1 image"), "got: {forgotten}");
+    let status = assert_success(run(&config, &["status"]));
+    assert!(status.contains("images: 0"), "got: {status}");
 }
 
 #[test]

@@ -517,9 +517,20 @@ fn cmd_folder_add(paths: &AppPaths, args: FolderAddArgs) -> Result<()> {
 
 fn cmd_folder_remove(paths: &AppPaths, args: FolderRemoveArgs) -> Result<()> {
     paths.ensure()?;
+    // Normalize the lookup the same way folder add normalizes what it stores,
+    // so the path form the user typed (no \\?\ prefix, symlinks unresolved)
+    // matches the canonical record (issue #22). dunce::simplified also lets a
+    // plain path match records stored with the prefix by an older release.
+    let requested = dunce::canonicalize(&args.id_or_path).ok();
     let mut matched = false;
     for folder in active_folders(paths)? {
-        if folder.id == args.id_or_path || folder.path.to_string_lossy() == args.id_or_path {
+        let path_matches = requested.as_ref().is_some_and(|requested_path| {
+            dunce::simplified(requested_path) == dunce::simplified(&folder.path)
+        });
+        if folder.id == args.id_or_path
+            || folder.path.to_string_lossy() == args.id_or_path
+            || path_matches
+        {
             let mut removed = folder.clone();
             removed.active = false;
             removed.removed_at = Some(Utc::now());
@@ -1046,10 +1057,16 @@ fn undo_rename_records(paths: &AppPaths, args: &RenameArgs) -> Result<Vec<Rename
 
 fn cmd_forget(paths: &AppPaths, args: ForgetArgs) -> Result<()> {
     paths.ensure()?;
-    let requested = fs::canonicalize(&args.file).unwrap_or_else(|_| args.file.clone());
+    // Normalize both sides before comparing so the path form the user typed
+    // matches records stored in any canonical form (issue #22: Windows
+    // \\?\ extended-prefix records must match the plain typed path).
+    let requested = dunce::canonicalize(&args.file).unwrap_or_else(|_| args.file.clone());
     let image = latest_images(paths)?
         .into_iter()
-        .find(|image| image.path == requested)
+        .find(|image| {
+            dunce::simplified(&image.path) == dunce::simplified(&requested)
+                || image.path == args.file
+        })
         .ok_or_else(|| anyhow!("no active image matched {}", args.file.display()))?;
 
     let deleted = if args.delete && image.path.exists() {
@@ -2392,8 +2409,10 @@ fn candidate_image_paths(paths: &AppPaths, args: &IngestArgs) -> Result<Vec<Path
 }
 
 fn canonicalize_existing_dir(path: &Path) -> Result<PathBuf> {
+    // dunce strips the Windows \\?\ extended-length prefix that
+    // fs::canonicalize returns, so stored paths match the form users type.
     let canonical =
-        fs::canonicalize(path).with_context(|| format!("{} does not exist", path.display()))?;
+        dunce::canonicalize(path).with_context(|| format!("{} does not exist", path.display()))?;
     if !canonical.is_dir() {
         bail!("{} is not a directory", canonical.display());
     }
