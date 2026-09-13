@@ -327,6 +327,45 @@ fn caption_missing_auth_is_nonzero() {
 }
 
 #[test]
+fn caption_provider_failure_is_nonzero() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("state");
+    let image = temp.path().join("screen.png");
+    fs::write(&image, b"not really png").unwrap();
+    assert_success(run(&config, &["init"]));
+
+    // Given: credentials exist but every provider request fails (issue #21:
+    // a 401 from api.openai.com exited 0 because job errors were only logged).
+    let output = Command::new(bin())
+        .env("CLAWGALLERY_CONFIG_DIR", &config)
+        .env("OPENAI_API_KEY", "sk-invalid-test-key")
+        .env("OPENAI_BASE_URL", "http://127.0.0.1:1")
+        .env("CODEX_HOME", config.join("codex-home"))
+        .args([
+            "caption",
+            "--file",
+            image.to_str().unwrap(),
+            "--max-retries",
+            "0",
+        ])
+        .output()
+        .expect("clawgallery command should run");
+
+    // Then: automation observes the failure through the exit code.
+    assert!(
+        !output.status.success(),
+        "caption must exit non-zero when the provider request fails\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let captions = config.join("captions.jsonl");
+    assert!(
+        !captions.exists() || fs::read_to_string(&captions).unwrap().trim().is_empty(),
+        "no caption record should be written on failure"
+    );
+}
+
+#[test]
 fn rename_accepts_explicit_dry_run_flag() {
     let temp = tempfile::tempdir().unwrap();
     let config = temp.path().join("state");

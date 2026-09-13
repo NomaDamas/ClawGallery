@@ -743,6 +743,7 @@ fn cmd_caption(paths: &AppPaths, args: CaptionArgs) -> Result<()> {
         return Ok(());
     }
     let provider = build_provider(&config, args.provider, args.model.clone(), args.max_retries)?;
+    let mut failures = 0usize;
     for result in bounded_concurrent_map(images, args.concurrency, |image| {
         caption_image_job(&provider, image)
     })? {
@@ -766,9 +767,13 @@ fn cmd_caption(paths: &AppPaths, args: CaptionArgs) -> Result<()> {
                 println!("captioned {}", result.image.path.display());
             }
             Err(err) => {
+                failures += 1;
                 log_error(paths, "caption", err);
             }
         }
+    }
+    if failures > 0 {
+        bail!("caption failed for {failures} image(s)");
     }
     Ok(())
 }
