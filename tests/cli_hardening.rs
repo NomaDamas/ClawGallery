@@ -111,11 +111,13 @@ fn folder_add_duplicate_is_not_noisy() {
     assert_success(run(&config, &["folder", "add", images.to_str().unwrap()]));
     let duplicate = assert_success(run(&config, &["folder", "add", images.to_str().unwrap()]));
 
+    // folder add stores and prints dunce-normalized paths (the Windows
+    // \\?\ prefix is stripped), so the duplicate notice uses the same form.
     assert_eq!(
         duplicate.trim(),
         format!(
             "folder already tracked: {}",
-            images.canonicalize().unwrap().display()
+            dunce::canonicalize(&images).unwrap().display()
         )
     );
 }
