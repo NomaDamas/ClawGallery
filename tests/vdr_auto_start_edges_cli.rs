@@ -2,7 +2,7 @@
 mod vdr_autosync_support;
 
 use vdr_autosync_support::{
-    assert_success, one_image_library, run_without_embedding_url, FakeEmbeddingServer,
+    FakeEmbeddingServer, assert_success, one_image_library, run_without_embedding_url,
 };
 
 #[test]
