@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4] — 2026-09-13
+
+### Fixed
+
+- Windows daemon install now registers a Task Scheduler job (`schtasks`) instead of writing a macOS launchd plist that Windows cannot consume (#20)
+- Caption jobs now exit non-zero when one or more images fail, so scripts and poll callers can detect the failure (#21)
+- `folder remove` and `forget --file` normalize both the typed path and the stored record, so a plain Windows path matches records stored with the `\\?\` extended-length prefix (#22)
+
 ## [0.2.3] — 2026-09-08
 
 ### Added
