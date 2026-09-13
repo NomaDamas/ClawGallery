@@ -86,9 +86,15 @@ fn vdr_auto_start_missing_python_path_fails_cleanly() {
 
     assert!(!output.status.success(), "sync should fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
+    // On Windows the default dense backend is ColQwen, so the missing
+    // interpreter is reported by the runtime inspection instead of the spawn.
+    let expected = if cfg!(windows) {
+        "failed to inspect colqwen Python runtime"
+    } else {
+        "failed to start Python interpreter"
+    };
     assert!(
-        stderr.contains("failed to start Python interpreter")
-            && stderr.contains(missing_python.to_str().expect("utf8")),
+        stderr.contains(expected) && stderr.contains(missing_python.to_str().expect("utf8")),
         "expected missing interpreter in error, got: {stderr}"
     );
 }
