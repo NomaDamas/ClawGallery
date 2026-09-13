@@ -2,7 +2,7 @@
 mod vdr_autosync_support;
 
 use vdr_autosync_support::{
-    FakeEmbeddingServer, assert_success, one_image_library, run_without_embedding_url,
+    assert_success, one_image_library, run_without_embedding_url, FakeEmbeddingServer,
 };
 
 #[test]
@@ -101,7 +101,6 @@ fn vdr_auto_start_missing_python_path_fails_cleanly() {
 
 #[cfg(unix)]
 #[test]
-#[cfg(unix)]
 fn vdr_vsplade_missing_runtime_fails_with_actionable_diagnostic() {
     let (temp, config) = one_image_library();
     let fake_python = temp.path().join("python-without-splade");
