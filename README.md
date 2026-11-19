@@ -268,6 +268,21 @@ The first sync downloads and caches the model weights. Later visual searches rea
 
 This Jina model is licensed under CC BY-NC 4.0 and is restricted to noncommercial use. Review the model license before using it in a product or service.
 
+### Central `inl` backend (im-not-llm)
+
+ClawGallery can embed through the shared [`inl`](https://github.com/NomaDamas/im-not-llm) (`im-not-llm`) daemon instead of managing its own Python runtime. `inl` owns the model weights (`~/.cache/im-not-llm/models`) and a loopback daemon, so every tool that speaks it shares one set of weights and one resident model.
+
+```bash
+cargo install inl-server --locked
+
+clawgallery vdr sync --backend inl             # finds or starts the shared daemon
+clawgallery search --mode embedding "sunset" --json
+```
+
+The default model is `google/embeddinggemma-2` (768 dimensions). Before starting anything, ClawGallery reads `~/.cache/im-not-llm/serve/*`, calls `GET /health` on each loopback server, and adopts one that reports `kind == "multimodal"` with a matching `model_id` (case-insensitive). Only when none runs does it launch `inl serve --multimodal --model <model> --idle-timeout 300` from `PATH` and stop it on exit; an adopted daemon is left running. If `inl` is not on `PATH`, sync fails with `install it with \`cargo install inl-server --locked\``.
+
+Later searches read the model and dimensions from the active index, so they auto-select the `inl` backend without repeating `--backend`. `--embedding-url` / `CLAWGALLERY_VDR_EMBEDDING_URL` still take precedence. The `inl` vision stack decodes PNG/JPEG/WebP; HEIC/HEIF images are rejected with a message telling you to convert them.
+
 ### Using your own embedding server
 
 To reuse a long-running server instead of the managed one, point ClawGallery at it and it won't auto-start anything:
@@ -415,8 +430,8 @@ clawgallery rename --undo [--last] [--file <path>] [--dry-run]
 clawgallery forget --file <path> [--delete]
 clawgallery dedup [--exact] [--similar] [--threshold <0..1>] [--json]
 clawgallery search [--mode keyword|embedding|lexical|hybrid] <query...> [--limit <n>] [--json] [--case-sensitive] [--no-fuzzy] [--embedding-url <url>]
-clawgallery vdr sync [--prune] [--embedding-url <url>] [--model <model>] [--dimensions <n>] [--max-retries <n>] [--auto-start|--no-auto-start] [--backend mlx|jina-mlx|colqwen|vsplade] [--host <host>] [--port <port>] [--device auto|mps|cpu|cuda] [--python <path>] [--allow-remote]
-clawgallery vdr serve [--backend mlx|jina-mlx|colqwen|vsplade] [--host <host>] [--port <port>] [--model <model>] [--dimensions <n>] [--device auto|mps|cpu|cuda] [--python <path>] [--allow-remote]
+clawgallery vdr sync [--prune] [--embedding-url <url>] [--model <model>] [--dimensions <n>] [--max-retries <n>] [--auto-start|--no-auto-start] [--backend mlx|jina-mlx|colqwen|vsplade|inl] [--host <host>] [--port <port>] [--device auto|mps|cpu|cuda] [--python <path>] [--allow-remote]
+clawgallery vdr serve [--backend mlx|jina-mlx|colqwen|vsplade|inl] [--host <host>] [--port <port>] [--model <model>] [--dimensions <n>] [--device auto|mps|cpu|cuda] [--python <path>] [--allow-remote]
 clawgallery vdr status [--json]
 clawgallery daemon install [--interval <seconds>] [--caption] [--sync] [--path <path>] [--folder <id>]
 clawgallery daemon start|stop|status|uninstall|logs
@@ -426,7 +441,8 @@ clawgallery skill path|print
 
 `jina-mlx` supports `--device auto|mps`; `cpu` is available only with the
 default `mlx` backend. `colqwen` supports `--device auto|cpu|cuda` and is the
-Windows dense default.
+Windows dense default. `inl` forwards `--device auto|cpu|metal|cuda` to the
+im-not-llm daemon and ignores `--python`.
 
 ---
 

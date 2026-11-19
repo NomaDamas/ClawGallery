@@ -12,6 +12,7 @@
 - Search captions/paths only: `clawgallery search --mode keyword "<query>" --json --limit 5`
 - Search VDR embeddings only: `clawgallery search --mode embedding "<query>" --json --limit 5`
 - Sync VDR embeddings: `clawgallery vdr sync`
+- Sync VDR embeddings through the shared im-not-llm daemon: `clawgallery vdr sync --backend inl` (`google/embeddinggemma-2`, 768 dims; discovers or starts `inl serve --multimodal` and shares `~/.cache/im-not-llm/models`)
 - Sync V-SPLADE lexical embeddings: `CLAWGALLERY_PYTHON=/path/to/splade-mlx/.venv/bin/python clawgallery vdr sync --backend vsplade`
 - Check VDR state: `clawgallery vdr status --json`
 - Full enrich + retrieve: `clawgallery caption --missing && clawgallery vdr sync --prune && clawgallery search "<query>" --json`

@@ -8,6 +8,9 @@ pub(super) const DEFAULT_COLQWEN_MODEL: &str = "vidore/colqwen2-v1.0";
 pub(super) const DEFAULT_COLQWEN_DIMENSIONS: usize = 128;
 const JINA_MLX_MODEL: &str = "jinaai/jina-embeddings-v5-omni-small-retrieval-mlx";
 const JINA_MLX_DIMENSIONS: usize = 1024;
+pub(super) const DEFAULT_INL_MODEL: &str = clawgallery_vdr::DEFAULT_MULTIMODAL_MODEL;
+pub(super) const DEFAULT_INL_DIMENSIONS: usize = clawgallery_vdr::DEFAULT_MULTIMODAL_DIMENSIONS;
+pub(super) const INL_MISSING_ERROR: &str = "the inl backend requires the im-not-llm `inl` binary on PATH; install it with `cargo install inl-server --locked`";
 pub(super) const DEFAULT_VSPLADE_MODEL: &str = clawgallery_vdr::DEFAULT_VSPLADE_MODEL;
 pub(super) const DEFAULT_VSPLADE_DIMENSIONS: usize = clawgallery_vdr::DEFAULT_VSPLADE_DIMENSIONS;
 #[cfg(windows)]
@@ -20,6 +23,8 @@ pub(crate) enum ServeBackend {
     JinaMlx,
     Colqwen,
     Vsplade,
+    /// Embed through the im-not-llm (`inl`) multimodal daemon.
+    Inl,
 }
 
 pub(super) struct BackendConfig {
@@ -44,6 +49,8 @@ pub(super) fn resolve_backend(
     let backend = backend.unwrap_or_else(|| {
         if model == Some(JINA_MLX_MODEL) {
             ServeBackend::JinaMlx
+        } else if model.is_some_and(|value| value.contains("embeddinggemma")) {
+            ServeBackend::Inl
         } else if model.is_some_and(|value| value.contains("v-splade") || value.contains("vsplade"))
         {
             ServeBackend::Vsplade
@@ -57,6 +64,7 @@ pub(super) fn resolve_backend(
         ServeBackend::Mlx => (DEFAULT_MLX_MODEL, DEFAULT_MLX_DIMENSIONS),
         ServeBackend::JinaMlx => (JINA_MLX_MODEL, JINA_MLX_DIMENSIONS),
         ServeBackend::Colqwen => (DEFAULT_COLQWEN_MODEL, DEFAULT_COLQWEN_DIMENSIONS),
+        ServeBackend::Inl => (DEFAULT_INL_MODEL, DEFAULT_INL_DIMENSIONS),
         ServeBackend::Vsplade => {
             #[cfg(windows)]
             {
@@ -86,8 +94,9 @@ pub(super) fn resolve_backend(
 #[cfg(test)]
 mod tests {
     use super::{
-        APPLE_ONLY_BACKEND_ERROR, DEFAULT_COLQWEN_DIMENSIONS, DEFAULT_COLQWEN_MODEL, ServeBackend,
-        default_dense_backend, resolve_backend,
+        APPLE_ONLY_BACKEND_ERROR, DEFAULT_COLQWEN_DIMENSIONS, DEFAULT_COLQWEN_MODEL,
+        DEFAULT_INL_DIMENSIONS, DEFAULT_INL_MODEL, ServeBackend, default_dense_backend,
+        resolve_backend,
     };
 
     #[test]
@@ -102,6 +111,22 @@ mod tests {
         assert_eq!(config.backend, ServeBackend::Colqwen);
         assert_eq!(config.model, DEFAULT_COLQWEN_MODEL);
         assert_eq!(config.dimensions, DEFAULT_COLQWEN_DIMENSIONS);
+    }
+
+    #[test]
+    fn inl_backend_defaults_to_embeddinggemma() {
+        let config = resolve_backend(Some(ServeBackend::Inl), None, None).expect("backend");
+        assert_eq!(config.model, DEFAULT_INL_MODEL);
+        assert_eq!(config.dimensions, DEFAULT_INL_DIMENSIONS);
+        assert_eq!(DEFAULT_INL_MODEL, "google/embeddinggemma-2");
+        assert_eq!(DEFAULT_INL_DIMENSIONS, 768);
+    }
+
+    #[test]
+    fn embeddinggemma_model_selects_inl_backend() {
+        let config = resolve_backend(None, Some(DEFAULT_INL_MODEL), Some(DEFAULT_INL_DIMENSIONS))
+            .expect("backend");
+        assert_eq!(config.backend, ServeBackend::Inl);
     }
 
     #[test]

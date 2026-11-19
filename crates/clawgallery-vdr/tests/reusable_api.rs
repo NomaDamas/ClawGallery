@@ -1,6 +1,6 @@
 use clawgallery_vdr::{
-    CaptionDocument, DEFAULT_MAX_RETRIES, ImageDocument, SearchConfig, SyncConfig, VectorEncoding,
-    embedding_search, status, sync,
+    CaptionDocument, DEFAULT_MAX_RETRIES, EmbeddingProtocol, ImageDocument, SearchConfig,
+    SyncConfig, VectorEncoding, embedding_search, status, sync,
 };
 use std::{
     fs,
@@ -37,6 +37,7 @@ fn reusable_vdr_api_indexes_and_searches_documents() {
             max_retries: DEFAULT_MAX_RETRIES,
             prune: true,
             encoding: VectorEncoding::Dense,
+            protocol: EmbeddingProtocol::LateInteraction,
         },
         images.clone(),
         captions.clone(),
@@ -49,6 +50,7 @@ fn reusable_vdr_api_indexes_and_searches_documents() {
             dimensions: Some(4),
             embedding_url: Some(server.url().to_string()),
             limit: 1,
+            protocol: EmbeddingProtocol::LateInteraction,
         },
         "dog",
         images,

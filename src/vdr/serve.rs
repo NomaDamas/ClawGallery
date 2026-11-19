@@ -1,10 +1,12 @@
-use super::backend::{APPLE_ONLY_BACKEND_ERROR, ServeBackend};
-use anyhow::{Context, Result, bail};
+use super::backend::{APPLE_ONLY_BACKEND_ERROR, INL_MISSING_ERROR, ServeBackend};
+use anyhow::{Context, Result, anyhow, bail};
+use serde::Deserialize;
 use serde_json::json;
 use std::{
     env,
+    io::ErrorKind,
     net::{IpAddr, TcpListener},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -16,6 +18,10 @@ const COLQWEN_SERVER: &str = include_str!("../../scripts/colqwen2_server.py");
 const VSPLADE_SERVER: &str = include_str!("../../scripts/vsplade_server.py");
 const VSPLADE_TORCH_SERVER: &str = include_str!("../../scripts/vsplade_torch_server.py");
 const MANAGED_STARTUP_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+/// How long the `inl` daemon ClawGallery starts stays resident after the last
+/// request. It is stopped with this process, so the timeout only bounds a
+/// launcher that outlives its ClawGallery.
+const INL_IDLE_TIMEOUT_SECS: u64 = 300;
 
 impl ServeBackend {
     const fn name(self) -> &'static str {
@@ -24,10 +30,11 @@ impl ServeBackend {
             Self::JinaMlx => "jina-mlx",
             Self::Colqwen => "colqwen",
             Self::Vsplade => "vsplade",
+            Self::Inl => "inl",
         }
     }
 
-    const fn script(self) -> &'static str {
+    fn script(self) -> &'static str {
         match self {
             Self::Mlx => MLX_SERVER,
             Self::JinaMlx => JINA_MLX_SERVER,
@@ -39,6 +46,7 @@ impl ServeBackend {
                     VSPLADE_SERVER
                 }
             }
+            Self::Inl => unreachable!("the inl backend runs no Python script"),
         }
     }
 }
@@ -57,11 +65,15 @@ pub(crate) struct ServeArgs {
 
 pub(crate) fn serve(args: ServeArgs) -> Result<()> {
     validate_bind_host(&args.host, args.allow_remote)?;
+    if args.backend == ServeBackend::Inl {
+        return run_inl_server(&args);
+    }
     run_python_server(&args)
 }
 
 pub(crate) struct ManagedServer {
-    child: Child,
+    /// `None` when an already running server was adopted instead of started.
+    child: Option<Child>,
     url: String,
 }
 
@@ -81,16 +93,22 @@ impl ManagedServer {
 
 impl Drop for ManagedServer {
     fn drop(&mut self) {
-        if matches!(self.child.try_wait(), Ok(Some(_))) {
+        let Some(child) = self.child.as_mut() else {
+            return;
+        };
+        if matches!(child.try_wait(), Ok(Some(_))) {
             return;
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
 
 fn start_managed_server(args: &ServeArgs, announce: bool) -> Result<ManagedServer> {
     validate_bind_host(&args.host, args.allow_remote)?;
+    if args.backend == ServeBackend::Inl {
+        return start_inl_server(args, announce);
+    }
     start_python_server(args, announce)
 }
 
@@ -144,7 +162,192 @@ fn start_python_server(args: &ServeArgs, announce: bool) -> Result<ManagedServer
         let _ = child.wait();
         return Err(err);
     }
-    Ok(ManagedServer { child, url })
+    Ok(ManagedServer {
+        child: Some(child),
+        url,
+    })
+}
+
+/// Run `inl serve` for the requested multimodal model in the foreground,
+/// letting it own its loopback address and lifetime.
+fn run_inl_server(args: &ServeArgs) -> Result<()> {
+    let status = inl_command(args, 0)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .map_err(inl_start_error)?;
+    if !status.success() {
+        bail!("inl embedding server exited with {status}");
+    }
+    Ok(())
+}
+
+/// Adopt a running `inl` multimodal server for `model`, or start one and wait
+/// for it to answer `/health`. Only a server ClawGallery started is stopped on
+/// drop; an adopted one is left alone.
+fn start_inl_server(args: &ServeArgs, announce: bool) -> Result<ManagedServer> {
+    if let Some(url) = discover_inl_server(&args.model) {
+        if announce {
+            println!(
+                "adopted running inl multimodal server for {} at {url}",
+                args.model
+            );
+        }
+        return Ok(ManagedServer { child: None, url });
+    }
+    if announce {
+        println!(
+            "starting managed inl multimodal server for {} from PATH",
+            args.model
+        );
+    }
+    let stderr = if announce {
+        Stdio::inherit()
+    } else {
+        Stdio::null()
+    };
+    let child = inl_command(args, INL_IDLE_TIMEOUT_SECS)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(stderr)
+        .spawn()
+        .map_err(inl_start_error)?;
+    let mut child = child;
+    wait_until_inl_discoverable(&mut child, &args.model)?;
+    let url = discover_inl_server(&args.model).ok_or_else(|| {
+        anyhow!(
+            "inl reports serving {} but discovery found no live server",
+            args.model
+        )
+    })?;
+    Ok(ManagedServer {
+        child: Some(child),
+        url,
+    })
+}
+
+fn inl_command(args: &ServeArgs, idle_timeout_secs: u64) -> Command {
+    let mut command = Command::new("inl");
+    command
+        .arg("serve")
+        .arg("--multimodal")
+        .arg("--model")
+        .arg(&args.model)
+        .arg("--host")
+        .arg(&args.host)
+        .arg("--port")
+        .arg(args.port.to_string())
+        .arg("--device")
+        .arg(&args.device)
+        .arg("--idle-timeout")
+        .arg(idle_timeout_secs.to_string());
+    command
+}
+
+fn inl_start_error(error: std::io::Error) -> anyhow::Error {
+    if error.kind() == ErrorKind::NotFound {
+        anyhow!("{INL_MISSING_ERROR}")
+    } else {
+        anyhow::Error::new(error).context("failed to start `inl serve`")
+    }
+}
+
+fn wait_until_inl_discoverable(child: &mut Child, model: &str) -> Result<()> {
+    let deadline = Instant::now() + MANAGED_STARTUP_TIMEOUT;
+    loop {
+        if discover_inl_server(model).is_some() {
+            return Ok(());
+        }
+        if let Some(status) = child.try_wait()? {
+            // A zero exit means `inl serve` adopted an existing server (which
+            // may still be loading); a failure means it never got there.
+            if !status.success() {
+                bail!(
+                    "inl serve for {model} exited before its server became reachable with {status}"
+                );
+            }
+        }
+        if Instant::now() >= deadline {
+            bail!("inl multimodal server for {model} did not become discoverable");
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+}
+
+/// The `inl` health subset discovery matches on.
+#[derive(Debug, Deserialize)]
+struct InlHealth {
+    status: String,
+    #[serde(default)]
+    kind: String,
+    model_id: String,
+}
+
+/// The `inl` serve root for this user, matching `inl_core::device::cache_root`
+/// (`$HOME/.cache/im-not-llm/serve`, `%LOCALAPPDATA%\im-not-llm\serve`).
+fn inl_serve_root() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        let root = env::var_os("LOCALAPPDATA")?;
+        Some(PathBuf::from(root).join("im-not-llm").join("serve"))
+    }
+    #[cfg(not(windows))]
+    {
+        let root = env::var_os("HOME")?;
+        Some(
+            PathBuf::from(root)
+                .join(".cache")
+                .join("im-not-llm")
+                .join("serve"),
+        )
+    }
+}
+
+/// Find a live `inl` server under the serve root that serves `model` as a
+/// multimodal engine, by reading each instance's `port`/`host` and matching
+/// the answering `/health`. Returns its loopback URL.
+fn discover_inl_server(model: &str) -> Option<String> {
+    let root = inl_serve_root()?;
+    let entries = std::fs::read_dir(&root).ok()?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .no_proxy()
+        .build()
+        .ok()?;
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        let Some(port) =
+            read_trimmed(&dir.join("port")).and_then(|value| value.parse::<u16>().ok())
+        else {
+            continue;
+        };
+        let host = read_trimmed(&dir.join("host")).unwrap_or_else(|| "127.0.0.1".to_string());
+        if !is_loopback_host(&host) {
+            continue;
+        }
+        let url = format!("http://{host}:{port}");
+        let Ok(response) = client.get(format!("{url}/health")).send() else {
+            continue;
+        };
+        let Ok(health) = response.json::<InlHealth>() else {
+            continue;
+        };
+        if health.status == "ok"
+            && health.kind == "multimodal"
+            && health.model_id.eq_ignore_ascii_case(model)
+        {
+            return Some(url);
+        }
+    }
+    None
+}
+
+fn read_trimmed(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn python_command(args: &ServeArgs, python: &PathBuf, port: u16) -> Command {
@@ -249,6 +452,7 @@ fn check_python_runtime(backend: ServeBackend, python: &PathBuf) -> Result<()> {
         ServeBackend::Mlx => fake_env_enabled("CLAWGALLERY_VDR_MLX_FAKE"),
         ServeBackend::JinaMlx => fake_env_enabled("CLAWGALLERY_VDR_JINA_MLX_FAKE"),
         ServeBackend::Colqwen | ServeBackend::Vsplade => false,
+        ServeBackend::Inl => unreachable!("the inl backend checks no Python runtime"),
     };
     if cfg!(windows)
         && matches!(backend, ServeBackend::Mlx | ServeBackend::JinaMlx)
@@ -270,6 +474,7 @@ fn check_python_runtime(backend: ServeBackend, python: &PathBuf) -> Result<()> {
             fake_env_enabled("CLAWGALLERY_VDR_VSPLADE_FAKE"),
         ),
         ServeBackend::Mlx | ServeBackend::JinaMlx => return Ok(()),
+        ServeBackend::Inl => unreachable!("the inl backend checks no Python imports"),
     };
     if fake {
         return Ok(());
