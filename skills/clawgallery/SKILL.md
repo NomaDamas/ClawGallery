@@ -147,6 +147,16 @@ CLAWGALLERY_PYTHON=~/.local/share/clawgallery/jina-mlx/bin/python \
 
 The packaged runtime pins Hugging Face revision `049ae923674456656be891ebb22849dd58124994`. Search infers `jina-mlx` from the exact active index model ID, but `CLAWGALLERY_PYTHON` must still point at the Jina environment. The model is CC BY-NC 4.0 and restricted to noncommercial use.
 
+Shared `inl` (im-not-llm) backend — no private Python runtime, weights shared with every other inl consumer:
+
+```bash
+cargo install inl-server --locked
+clawgallery vdr sync --backend inl
+clawgallery search --mode embedding "sunset" --json
+```
+
+Default model `google/embeddinggemma-2` (dimensions `768`). ClawGallery reads `~/.cache/im-not-llm/serve/*`, calls `GET /health` on each loopback server, and adopts one whose `kind` is `multimodal` and whose `model_id` matches (case-insensitive); only when none runs does it start `inl serve --multimodal --model <model> --idle-timeout 300` from `PATH` and stop it on exit. Weights live in `~/.cache/im-not-llm/models` (`INL_CACHE_DIR` overrides the location). Search auto-selects `inl` from the active index model, so later searches need no `--backend`. `--embedding-url` / `CLAWGALLERY_VDR_EMBEDDING_URL` still win. Images are sent as base64 over `POST /embed_multimodal`; PNG/JPEG/WebP decode, HEIC/HEIF is rejected with a conversion hint.
+
 If Hugging Face xet downloads stall on macOS, retry the first sync with:
 
 ```bash

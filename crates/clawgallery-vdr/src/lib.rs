@@ -21,6 +21,10 @@ pub use sparse::{SparseVector, rrf_score};
 pub const DEFAULT_EMBEDDING_URL: &str = "http://127.0.0.1:8765";
 pub const DEFAULT_VDR_MODEL: &str = "vidore/colqwen2-v1.0";
 pub const DEFAULT_DIMENSIONS: usize = 128;
+/// Default multimodal model served by the `inl` (im-not-llm) daemon.
+pub const DEFAULT_MULTIMODAL_MODEL: &str = "google/embeddinggemma-2";
+/// Vector width `DEFAULT_MULTIMODAL_MODEL` returns.
+pub const DEFAULT_MULTIMODAL_DIMENSIONS: usize = 768;
 pub const DEFAULT_VSPLADE_MODEL: &str = "NomaDamas/v-splade-efficient-mlx";
 pub const DEFAULT_VSPLADE_DIMENSIONS: usize = 50368;
 const SYNC_EMBEDDING_BATCH_SIZE: usize = 1;
@@ -47,6 +51,19 @@ pub enum VectorEncoding {
     Sparse,
 }
 
+/// Wire protocol used to talk to the embedding server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EmbeddingProtocol {
+    /// ClawGallery's ColQwen/MLX late-interaction protocol: `POST /embed`
+    /// with `{kind, role, value}` inputs and a multi-vector response.
+    #[default]
+    LateInteraction,
+    /// The im-not-llm (`inl`) multimodal protocol: `POST /embed_multimodal`
+    /// with `{text}` / `{images: [base64]}` inputs and a single-vector
+    /// response per input.
+    Multimodal,
+}
+
 #[derive(Debug, Clone)]
 pub struct SyncConfig {
     pub db_path: PathBuf,
@@ -56,6 +73,7 @@ pub struct SyncConfig {
     pub max_retries: usize,
     pub prune: bool,
     pub encoding: VectorEncoding,
+    pub protocol: EmbeddingProtocol,
 }
 
 #[derive(Debug, Clone)]
@@ -65,6 +83,7 @@ pub struct SearchConfig {
     pub dimensions: Option<usize>,
     pub embedding_url: Option<String>,
     pub limit: usize,
+    pub protocol: EmbeddingProtocol,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,7 +175,8 @@ pub fn sync(
             .collect();
         indexed_vectors += match config.encoding {
             VectorEncoding::Dense => {
-                let response = client::embed_with_retries(
+                let response = client::embed_with_protocol(
+                    config.protocol,
                     &url,
                     &config.model,
                     config.dimensions,

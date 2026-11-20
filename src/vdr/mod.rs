@@ -2,9 +2,10 @@ use crate::{AppPaths, CaptionRecord, ImageRecord};
 use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
 use clawgallery_vdr::{
-    CaptionDocument, EmbeddingSearchHit, ImageDocument, SearchConfig, SyncConfig, SyncOutcome,
-    VectorEncoding, deactivate_image_vectors as deactivate_library_vectors, embedding_search,
-    lexical_search, pending_embedding_count, similar_image_groups as library_similar_image_groups,
+    CaptionDocument, EmbeddingProtocol, EmbeddingSearchHit, ImageDocument, SearchConfig,
+    SyncConfig, SyncOutcome, VectorEncoding,
+    deactivate_image_vectors as deactivate_library_vectors, embedding_search, lexical_search,
+    pending_embedding_count, similar_image_groups as library_similar_image_groups,
     status as library_status, sync,
 };
 use std::{collections::HashMap, env, path::PathBuf};
@@ -139,6 +140,7 @@ pub(crate) fn cmd_sync(paths: &AppPaths, args: VdrSyncArgs) -> Result<()> {
         max_retries: args.max_retries,
         prune: args.prune,
         encoding: encoding_for(backend.backend),
+        protocol: protocol_for(backend.backend),
     };
     let image_documents = image_documents(&images);
     let caption_documents = caption_documents_from_map(captions);
@@ -218,10 +220,32 @@ fn format_channel(name: &str, channel: &clawgallery_vdr::IndexChannelStatus) -> 
     }
 }
 
+/// The dense backend a VDR model id implies, for callers (poll --sync) that
+/// carry a model but no `--backend` flag. Falls back to the platform default.
+pub(crate) fn backend_for_model(model: &str) -> ServeBackend {
+    if model.contains("embeddinggemma") {
+        ServeBackend::Inl
+    } else {
+        default_dense_backend()
+    }
+}
+
 fn encoding_for(backend: ServeBackend) -> VectorEncoding {
     match backend {
         ServeBackend::Vsplade => VectorEncoding::Sparse,
-        ServeBackend::Mlx | ServeBackend::JinaMlx | ServeBackend::Colqwen => VectorEncoding::Dense,
+        ServeBackend::Mlx | ServeBackend::JinaMlx | ServeBackend::Colqwen | ServeBackend::Inl => {
+            VectorEncoding::Dense
+        }
+    }
+}
+
+fn protocol_for(backend: ServeBackend) -> EmbeddingProtocol {
+    match backend {
+        ServeBackend::Inl => EmbeddingProtocol::Multimodal,
+        ServeBackend::Mlx
+        | ServeBackend::JinaMlx
+        | ServeBackend::Colqwen
+        | ServeBackend::Vsplade => EmbeddingProtocol::LateInteraction,
     }
 }
 
@@ -276,6 +300,7 @@ pub(crate) fn embedding_search_hits(
             dimensions: Some(dimensions),
             embedding_url,
             limit,
+            protocol: protocol_for(backend.backend),
         },
         query,
         image_documents(&images),
@@ -331,6 +356,7 @@ pub(crate) fn lexical_search_hits(
             dimensions: Some(index.dimensions),
             embedding_url,
             limit,
+            protocol: protocol_for(backend.backend),
         },
         query,
         image_documents(&images),

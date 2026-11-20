@@ -3,7 +3,9 @@ use anyhow::{Result, bail};
 use std::{collections::HashMap, path::PathBuf};
 
 use super::{
-    client::{default_model, embed, embed_sparse, query_input, resolve_embedding_url},
+    client::{
+        default_model, embed_sparse, embed_with_protocol, query_input, resolve_embedding_url,
+    },
     index::{ActiveIndexConfig, latest_active_index_config, latest_sparse_index_config},
     store::{active_sparse_vectors, active_vectors, open_store},
 };
@@ -31,11 +33,13 @@ pub(super) fn embedding_search(
         (Some(model), Some(dimensions)) => ActiveIndexConfig { model, dimensions },
         _ => latest_active_index_config(&conn)?.unwrap_or_else(default_index_config),
     };
-    let response = embed(
+    let response = embed_with_protocol(
+        config.protocol,
         &url,
         &index_config.model,
         index_config.dimensions,
         vec![query_input(query)],
+        crate::DEFAULT_MAX_RETRIES,
     )?;
     let query_vectors = response
         .embeddings

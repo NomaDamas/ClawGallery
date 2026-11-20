@@ -676,7 +676,7 @@ fn cmd_poll(paths: &AppPaths, args: PollArgs) -> Result<()> {
                     max_retries: args.max_retries,
                     auto_start: false,
                     no_auto_start: true,
-                    backend: Some(vdr::default_dense_backend()),
+                    backend: Some(vdr::backend_for_model(&args.vdr_model)),
                     host: "127.0.0.1".to_string(),
                     port: 0,
                     device: "auto".to_string(),
