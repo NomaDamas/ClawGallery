@@ -121,13 +121,20 @@ fn serve(
     stream.write_all(reply.as_bytes()).expect("write response");
 }
 
+/// The im-not-llm root under an isolated home, as `inl_core::device::cache_root`
+/// computes it: `$HOME/.cache/im-not-llm`, `%LOCALAPPDATA%\im-not-llm` on Windows.
+fn inl_root(home: &Path) -> PathBuf {
+    if cfg!(windows) {
+        home.join("LocalAppData").join("im-not-llm")
+    } else {
+        home.join(".cache").join("im-not-llm")
+    }
+}
+
 /// An isolated `$HOME` with a discovery directory recording `server`.
 fn isolated_home(server: &FakeInlServer) -> tempfile::TempDir {
     let home = tempfile::tempdir().expect("home tempdir");
-    let state_dir = home
-        .path()
-        .join(".cache")
-        .join("im-not-llm")
+    let state_dir = inl_root(home.path())
         .join("serve")
         .join("fake-multimodal-instance");
     fs::create_dir_all(&state_dir).expect("create serve state dir");
@@ -157,6 +164,7 @@ fn run_with_home(config: &Path, home: &Path, args: &[&str]) -> Output {
     fs::create_dir_all(&empty_path).expect("create empty PATH dir");
     Command::new(clawgallery_bin())
         .env("HOME", home)
+        .env("LOCALAPPDATA", home.join("LocalAppData"))
         .env("PATH", &empty_path)
         .env("CLAWGALLERY_CONFIG_DIR", config)
         .env_remove("CLAWGALLERY_VDR_EMBEDDING_URL")
