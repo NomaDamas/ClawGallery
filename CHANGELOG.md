@@ -7,10 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5] — 2026-11-20
+
 ### Added
 
 - `vdr sync|serve|search --backend inl` embeds through the shared im-not-llm (`inl`) multimodal daemon (`google/embeddinggemma-2`, 768 dimensions), discovering or starting it under `~/.cache/im-not-llm/serve` and sharing its `~/.cache/im-not-llm/models` weight cache
 - `inl` sends `POST /embed_multimodal` with image bytes as base64 and text/caption inputs with a query/passage `input_type`; HEIC/HEIF images fail with a conversion hint
+
+### Changed
+
+- `clawgallery-vdr`: `SyncConfig` and `SearchConfig` gain a `protocol` field (`EmbeddingProtocol`). `EmbeddingProtocol` is `Default` and defaults to `LateInteraction`, the previous behaviour, so callers that build these structs with `..Default::default()` are unaffected; others must name the field.
 
 ## [0.2.4] — 2026-09-13
 
