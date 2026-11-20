@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `clawgallery-vdr`: `SyncConfig` and `SearchConfig` gain a `protocol` field (`EmbeddingProtocol`). `EmbeddingProtocol` is `Default` and defaults to `LateInteraction`, the previous behaviour, so callers that build these structs with `..Default::default()` are unaffected; others must name the field.
+- `clawgallery-vdr` (library API): `SyncConfig` and `SearchConfig` gain a `protocol: EmbeddingProtocol` field. They are built with struct literals, so existing callers must add it; `EmbeddingProtocol::LateInteraction` (also its `Default`) keeps the previous behaviour.
 
 ## [0.2.4] — 2026-09-13
 
